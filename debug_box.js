@@ -3,35 +3,27 @@
  * EQWEL 会場図面 & ENG視界シミュレーター Mark2
  * 【デバッグ・意見BOXモジュール】 (debug_box.js)
  * 
- * 担当機能:
- * 1. 画面左下デバッグBOXの折りたたみ（最小化 / 展開）
- * 2. タブ切り替え（「📋 ログ・診断」/「✉️ ご意見送信」）
- * 3. コアエンジン・各タブからのログ出力（log, info, warn, error）と自動スクロール
- * 4. ログ消去（clear）
- * 5. 図面状態スナップショット付きの意見・フィードバック送信（GAS連携 / mailtoフォールバック）
+ * 変更点:
+ * - 画面内を自由にドラッグ移動できる機能 (setupDebugBoxDragging) を追加
+ * - ログの視認性向上
  * ==============================================================================
  */
 
 (function () {
   'use strict';
 
-  // --- 設定項目 ---
-  // ※後ほどGoogle Apps Script (GAS) をデプロイした際、発行されたウェブアプリURLをここに設定します
   const CONFIG = {
-    gasWebAppUrl: '', // 例: 'https://script.google.com/macros/s/XXXXX/exec'
-    maxLogCount: 60,  // BOX内に保持する最大ログ行数
-    adminEmail: 'stage-support@example.com' // GAS未設定時のmailtoフォールバック宛先
+    gasWebAppUrl: '', 
+    maxLogCount: 60,
+    adminEmail: 'stage-support@example.com' 
   };
-
-  // ============================================================================
-  // 1. UI制御（折りたたみ・タブ切り替え）
-  // ============================================================================
 
   let isCollapsed = false;
 
-  /**
-   * BOX全体の折りたたみ / 展開
-   */
+  // ============================================================================
+  // 1. UI制御（折りたたみ・タブ・★ドラッグ移動）
+  // ============================================================================
+
   window.toggleDebugBox = function () {
     const body = document.getElementById('debug-box-body');
     const toggleBtn = document.getElementById('btn-debug-toggle');
@@ -39,14 +31,9 @@
 
     isCollapsed = !isCollapsed;
     body.style.display = isCollapsed ? 'none' : 'flex';
-    if (toggleBtn) {
-      toggleBtn.innerText = isCollapsed ? '＋' : '－';
-    }
+    if (toggleBtn) toggleBtn.innerText = isCollapsed ? '＋' : '－';
   };
 
-  /**
-   * タブ切り替え ('log' または 'mail')
-   */
   window.switchDebugTab = function (tabKey) {
     const btnLog = document.getElementById('tabbtn-dbg-log');
     const btnMail = document.getElementById('tabbtn-dbg-mail');
@@ -64,22 +51,86 @@
       if (panelMail) panelMail.classList.add('active');
       if (panelLog) panelLog.classList.remove('active');
     }
-
-    // 折りたたまれている場合は開く
-    if (isCollapsed) {
-      window.toggleDebugBox();
-    }
+    if (isCollapsed) window.toggleDebugBox();
   };
+
+  // ★ 追加：デバッグBOXのドラッグ移動機構
+  function setupDebugBoxDragging() {
+    const box = document.getElementById('debug-box');
+    const header = box ? box.querySelector('.debug-box-header') : null;
+    if (!box || !header) return;
+
+    // スクロールの巻き添えを防ぐため body 直下へ移動
+    if (box.parentElement !== document.body) {
+      document.body.appendChild(box);
+    }
+
+    // 初期スタイル（左下固定からスタート）
+    box.style.position = 'fixed';
+    box.style.zIndex = '999998'; // パレットより1つ下
+    box.style.margin = '0';
+    box.style.left = '12px';
+    box.style.bottom = '12px';
+    box.style.top = 'auto';
+    box.style.right = 'auto';
+
+    let isDraggingBox = false;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    header.addEventListener('mousedown', e => {
+      // ボタン類をクリックした時はドラッグしない
+      if (['BUTTON', 'INPUT'].includes(e.target.tagName)) return;
+      if (e.target.closest('.debug-box-actions')) return;
+
+      isDraggingBox = true;
+      const rect = box.getBoundingClientRect();
+      offsetX = e.clientX - rect.left;
+      offsetY = e.clientY - rect.top;
+
+      // 座標モードを bottom/right から top/left 制御へ切り替え
+      box.style.bottom = 'auto';
+      box.style.right = 'auto';
+      box.style.left = rect.left + 'px';
+      box.style.top = rect.top + 'px';
+      box.style.transition = 'none'; // ドラッグ中のラグ防止
+
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', e => {
+      if (!isDraggingBox) return;
+      let newLeft = e.clientX - offsetX;
+      let newTop = e.clientY - offsetY;
+
+      // 画面外への飛び出しブロック
+      const pad = 10;
+      const maxLeft = window.innerWidth - box.offsetWidth - pad;
+      const maxTop = window.innerHeight - 40;
+      
+      newLeft = Math.max(pad, Math.min(newLeft, maxLeft));
+      newTop = Math.max(pad, Math.min(newTop, maxTop));
+
+      box.style.left = newLeft + 'px';
+      box.style.top = newTop + 'px';
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isDraggingBox) {
+        isDraggingBox = false;
+        document.body.style.userSelect = 'auto';
+        box.style.transition = 'max-height 0.2s ease';
+      }
+    });
+  }
 
   // ============================================================================
   // 2. ログ・診断出力API (window.debugBox)
   // ============================================================================
-
   function appendLogItem(message, level = 'info') {
     const container = document.getElementById('debug-box-content');
     if (!container) return;
 
-    // 現在時刻 [HH:MM:SS]
     const now = new Date();
     const timeStr = [
       String(now.getHours()).padStart(2, '0'),
@@ -87,85 +138,41 @@
       String(now.getSeconds()).padStart(2, '0')
     ].join(':');
 
+    // 絵文字が含まれていないシステムログには青ポッチを付ける
+    const hasEmoji = /[\u2700-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD10-\uDDFF]/.test(message);
+    const prefix = hasEmoji ? '' : '🔹 ';
+
     const item = document.createElement('div');
     item.className = `debug-item ${level}`;
-    item.innerText = `[${timeStr}] ${message}`;
+    item.innerText = `[${timeStr}] ${prefix}${message}`;
 
     container.appendChild(item);
 
-    // 最大行数を超えたら古いものを削除
     while (container.children.length > CONFIG.maxLogCount) {
       container.removeChild(container.firstChild);
     }
-
-    // 最下部へ自動スクロール
     container.scrollTop = container.scrollHeight;
   }
 
   const debugBoxAPI = {
-    /**
-     * 通常情報ログ
-     */
-    log: function (msg) {
-      appendLogItem(msg, 'info');
-    },
-    info: function (msg) {
-      appendLogItem(msg, 'info');
-    },
-
-    /**
-     * 警告ログ（視野被り・干渉など）
-     */
-    warn: function (msg) {
-      appendLogItem(msg, 'warn');
-    },
-
-    /**
-     * エラーログ
-     */
-    error: function (msg) {
-      appendLogItem(msg, 'error');
-    },
-
-    /**
-     * ログ表示エリアの消去
-     */
+    log: function (msg) { appendLogItem(msg, 'info'); },
+    info: function (msg) { appendLogItem(msg, 'info'); },
+    warn: function (msg) { appendLogItem(msg, 'warn'); },
+    error: function (msg) { appendLogItem(msg, 'error'); },
     clear: function () {
       const container = document.getElementById('debug-box-content');
-      if (container) {
-        container.innerHTML = '<div class="debug-item info">ログを消去しました。待機中...</div>';
-      }
+      if (container) container.innerHTML = '<div class="debug-item info">🧹 ログを消去しました</div>';
     },
-
-    /**
-     * 診断結果のフォーマット流し込み
-     */
     diagnose: function (diagData) {
       if (!diagData) return;
-      if (typeof diagData === 'string') {
-        this.info(`[診断] ${diagData}`);
-        return;
-      }
-
+      if (typeof diagData === 'string') return this.info(`[診断] ${diagData}`);
       this.info(`--- 【システム自動診断】 ---`);
       if (diagData.roomInfo) this.info(`会場: ${diagData.roomInfo}`);
       if (diagData.stats) this.info(`統計: ${diagData.stats}`);
       if (diagData.cameraDetails) this.info(`カメラ: ${diagData.cameraDetails}`);
-      if (diagData.warnings && Array.isArray(diagData.warnings)) {
-        diagData.warnings.forEach(w => this.warn(`⚠️ ${w}`));
-      }
+      if (diagData.warnings && Array.isArray(diagData.warnings)) diagData.warnings.forEach(w => this.warn(`⚠️ ${w}`));
     },
-
-    /**
-     * GAS エンドポイントURLの設定
-     */
-    setGasUrl: function (url) {
-      CONFIG.gasWebAppUrl = url;
-    },
-
-    // ============================================================================
-    // 3. ご意見・フィードバック送信処理
-    // ============================================================================
+    setGasUrl: function (url) { CONFIG.gasWebAppUrl = url; },
     sendFeedback: async function () {
       const senderInput = document.getElementById('feedback-sender');
       const contentInput = document.getElementById('feedback-content');
@@ -178,14 +185,10 @@
       const isAttach = attachCheck ? attachCheck.checked : true;
 
       if (!content) {
-        if (statusEl) {
-          statusEl.style.color = '#f87171';
-          statusEl.innerText = '※ご意見・不具合内容を入力してください。';
-        }
+        if (statusEl) { statusEl.style.color = '#f87171'; statusEl.innerText = '※ご意見・不具合内容を入力してください。'; }
         return;
       }
 
-      // システムスナップショットの取得
       let systemSnapshot = null;
       if (isAttach && window.core && typeof window.core.getSystemSummary === 'function') {
         systemSnapshot = window.core.getSystemSummary();
@@ -200,69 +203,41 @@
       };
 
       if (sendBtn) sendBtn.disabled = true;
-      if (statusEl) {
-        statusEl.style.color = '#38bdf8';
-        statusEl.innerText = '送信中...';
-      }
+      if (statusEl) { statusEl.style.color = '#38bdf8'; statusEl.innerText = '送信中...'; }
 
-      // GAS WebApp URL が設定されている場合 (POST通信)
       if (CONFIG.gasWebAppUrl) {
         try {
-          const response = await fetch(CONFIG.gasWebAppUrl, {
-            method: 'POST',
-            mode: 'no-cors', // GASクロスオリジン対応
+          await fetch(CONFIG.gasWebAppUrl, {
+            method: 'POST', mode: 'no-cors',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
           });
-
-          if (statusEl) {
-            statusEl.style.color = '#4ade80';
-            statusEl.innerText = '✅ 送信完了しました。ありがとうございます！';
-          }
+          if (statusEl) { statusEl.style.color = '#4ade80'; statusEl.innerText = '✅ 送信完了しました。'; }
           if (contentInput) contentInput.value = '';
-          appendLogItem(`フィードバック送信完了 (${payload.sender})`, 'info');
+          appendLogItem(`フィードバック送信完了`, 'info');
         } catch (err) {
-          console.error('GAS送信エラー:', err);
-          if (statusEl) {
-            statusEl.style.color = '#f87171';
-            statusEl.innerText = '送信に失敗しました。時間をおいて再試行してください。';
-          }
-          appendLogItem(`フィードバック送信失敗: ${err.message}`, 'error');
+          if (statusEl) { statusEl.style.color = '#f87171'; statusEl.innerText = '送信失敗。'; }
+          appendLogItem(`送信失敗: ${err.message}`, 'error');
         } finally {
           if (sendBtn) sendBtn.disabled = false;
         }
       } else {
-        // GAS URL未設定時のフォールバック (クリップボードコピー ＆ メーラー起動)
         const summaryText = systemSnapshot ? `\n\n【図面状態】\n${systemSnapshot.roomInfo || ''}\n${systemSnapshot.stats || ''}\n${systemSnapshot.cameraDetails || ''}` : '';
         const mailBody = `【送信者】: ${payload.sender}\n【送信日時】: ${payload.timestamp}\n\n【内容】:\n${payload.content}${summaryText}`;
-
-        try {
-          if (navigator.clipboard) {
-            await navigator.clipboard.writeText(mailBody);
-          }
-        } catch (_) {}
-
-        if (statusEl) {
-          statusEl.style.color = '#fde68a';
-          statusEl.innerText = '⚠️ GAS未設定: 内容をコピーしました。メーラーを起動します。';
-        }
-
-        const mailtoUri = `mailto:${CONFIG.adminEmail}?subject=${encodeURIComponent('【図面シミュレーターMark2】意見・報告')}&body=${encodeURIComponent(mailBody)}`;
-        window.open(mailtoUri, '_blank');
-
+        try { if (navigator.clipboard) await navigator.clipboard.writeText(mailBody); } catch (_) {}
+        if (statusEl) { statusEl.style.color = '#fde68a'; statusEl.innerText = '⚠️ 内容をコピーし、メーラーを起動します。'; }
+        window.open(`mailto:${CONFIG.adminEmail}?subject=${encodeURIComponent('【図面シミュレーターMark2】意見・報告')}&body=${encodeURIComponent(mailBody)}`, '_blank');
         if (sendBtn) sendBtn.disabled = false;
         appendLogItem(`メール起動 (GAS未連携)`, 'warn');
       }
     }
   };
 
-  // グローバル公開
   window.debugBox = debugBoxAPI;
   window.debugBoxModule = debugBoxAPI;
 
-  // 初期化完了通知
   window.addEventListener('DOMContentLoaded', () => {
-    // 起動時の初期ログ
-    appendLogItem('デバッグBOXモジュールが準備完了しました', 'info');
+    setupDebugBoxDragging();
+    appendLogItem('システム起動・ログ監視を開始しました', 'info');
   });
 })();

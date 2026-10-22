@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ENG Sightline & Stage Simulator Mark2 (12タブ対応版)</title>
+  <title>ENG Sightline & Stage Simulator Mark2 (分割アーキテクチャ版)</title>
+  <!-- 基盤スクリプト: CSS -->
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -101,35 +102,33 @@
     <!-- 左下：デバッグ用 意見BOX ＆ 凡例 -->
     <div class="hud-left-bottom" style="position: absolute; bottom: 12px; left: 12px; z-index: 40; display: flex; flex-direction: column; gap: 8px;">
 
-      <!-- ★ デバッグ用 意見BOX -->
+      <!-- デバッグ用 意見BOX -->
       <div id="debug-box" class="debug-box">
-        <div class="debug-box-header" onclick="toggleDebugBox()">
+        <div class="debug-box-header" onclick="if(typeof toggleDebugBox==='function')toggleDebugBox()">
           <span class="debug-box-title">🛠️ 意見・デバッグBOX</span>
           <div class="debug-box-actions" onclick="event.stopPropagation()">
-            <button type="button" class="btn-debug-action" onclick="window.debugBox && window.debugBox.clear()">消去</button>
-            <button type="button" class="btn-debug-action" id="btn-debug-toggle" onclick="toggleDebugBox()">－</button>
+            <button type="button" class="btn-debug-action" onclick="if(window.debugBox)window.debugBox.clear()">消去</button>
+            <button type="button" class="btn-debug-action" id="btn-debug-toggle" onclick="if(typeof toggleDebugBox==='function')toggleDebugBox()">－</button>
           </div>
         </div>
         
         <div id="debug-box-body" class="debug-box-body">
-          <!-- タブ切り替え（ログ確認 / 意見送信） -->
           <div class="debug-tab-bar">
-            <button type="button" class="debug-tab-btn active" id="tabbtn-dbg-log" onclick="switchDebugTab('log')">📋 ログ・診断</button>
-            <button type="button" class="debug-tab-btn" id="tabbtn-dbg-mail" onclick="switchDebugTab('mail')">✉️ ご意見送信</button>
+            <button type="button" class="debug-tab-btn active" id="tabbtn-dbg-log" onclick="if(typeof switchDebugTab==='function')switchDebugTab('log')">📋 ログ・診断</button>
+            <button type="button" class="debug-tab-btn" id="tabbtn-dbg-mail" onclick="if(typeof switchDebugTab==='function')switchDebugTab('mail')">✉️ ご意見送信</button>
           </div>
 
-          <!-- 1. ログ・診断パネル -->
           <div id="panel-dbg-log" class="debug-panel active">
             <div id="debug-box-content" class="debug-box-content">
               <div class="debug-item info">システム準備中...</div>
             </div>
           </div>
 
-          <!-- 2. メール・意見送信パネル -->
           <div id="panel-dbg-mail" class="debug-panel">
             <div class="debug-mail-form">
               <div class="dbg-form-row">
-                <input type="text" id="feedback-sender" placeholder="お名前・担当 (例: 野口 / 配信担当)" />
+                <!-- プレースホルダーを「例: クラフト」に変更 -->
+                <input type="text" id="feedback-sender" placeholder="お名前・担当 (例: クラフト)" />
               </div>
               <div class="dbg-form-row">
                 <textarea id="feedback-content" rows="3" placeholder="不具合報告や欲しい機能を入力..."></textarea>
@@ -138,7 +137,8 @@
                 <label class="dbg-checkbox-label">
                   <input type="checkbox" id="feedback-attach-state" checked /> 図面状態を添付
                 </label>
-                <button type="button" class="btn-dbg-send" id="btn-dbg-send" onclick="window.debugBox && window.debugBox.sendFeedback()">メール送信</button>
+                <!-- 送信先を noguchi.kairu@aur.co.jp に設定（引数およびdata属性で渡す） -->
+                <button type="button" class="btn-dbg-send" id="btn-dbg-send" data-mailto="noguchi.kairu@aur.co.jp" onclick="if(window.debugBox)window.debugBox.sendFeedback('noguchi.kairu@aur.co.jp')">メール送信</button>
               </div>
               <div id="feedback-status" class="feedback-status-msg"></div>
             </div>
@@ -168,7 +168,7 @@
     </div>
 
     <div id="floating-body">
-      <!-- 全12タブ切り替えバー -->
+      <!-- 12タブ切り替えバー -->
       <div class="tab-bar">
         <button class="tab-btn active" id="tabbtn-room" onclick="if(typeof switchTab==='function')switchTab('room')">🏛 会場</button>
         <button class="tab-btn" id="tabbtn-facility" onclick="if(typeof switchTab==='function')switchTab('facility')">🏢 会場設備</button>
@@ -185,6 +185,7 @@
       </div>
 
       <!-- 操作パネル内：タブコンテンツ受け皿群 (空のコンテナ) -->
+      <!-- ※各JSモジュールの initUI() 関数によって動的にHTMLが注入されます -->
       <div class="tab-content" id="tab-content-container">
         <div class="tab-panel active" id="panel-room"></div>
         <div class="tab-panel" id="panel-facility"></div>
@@ -203,27 +204,33 @@
   </div>
 
   <!-- ==========================================================================
-       スクリプト読み込み (土台コアエンジン → デバッグBOX → 各タブモジュール全12種)
+       スクリプト読み込み (依存関係に基づく厳格な読み込み順序)
        ========================================================================== -->
   <!-- 1. 基盤コアエンジン -->
   <script src="core_engine.js"></script>
 
-  <!-- 2. デバッグ用 意見BOXモジュール -->
+  <!-- 2. 意見BOX・デバッグモジュール -->
   <script src="debug_box.js"></script>
 
-  <!-- 3. 各タブモジュール (最初から全12本を常時読み込み) -->
+  <!-- 3. 各タブモジュール (1〜6) -->
   <script src="tab1_room.js"></script>
   <script src="tab2_facility.js"></script>
   <script src="tab3_podium.js"></script>
   <script src="tab4_guests.js"></script>
   <script src="tab5_stage_items.js"></script>
   <script src="tab6_seats.js"></script>
+
+  <!-- 4. カメラセクション (必ず base → angle → tab7_camera の順で読み込む) -->
+  <script src="camera_angle.js"></script>
+  <script src="camera_base.js"></script>
   <script src="tab7_camera.js"></script>
-  <script src="tab8_display.js"></script>
-  <script src="tab9_equipment.js"></script>
-  <script src="tab10_monitor.js"></script>
-  <script src="tab11_bgimage.js"></script>
-  <script src="tab12_ai_gen.js"></script>
+
+  <!-- 5. 今後追加するタブモジュール (実装完了後に順次コメントアウトを解除) -->
+  <!-- <script src="tab8_display.js"></script> -->
+  <!-- <script src="tab9_equipment.js"></script> -->
+  <!-- <script src="tab10_monitor.js"></script> -->
+  <!-- <script src="tab11_bgimage.js"></script> -->
+  <!-- <script src="tab12_ai_gen.js"></script> -->
 
 </body>
-</html>
+</html

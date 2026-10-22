@@ -1,16 +1,20 @@
 /**
  * tab6_seats.js
  * タブ6：客席配置・個別編集・角度調整 & 立面図描画モジュール
- * ・【修正】window.scale の判定漏れによる平面図（Top View）消失バグを解決
- * ・【修正】立面図での斜め投影を廃止し、コアエンジンのステージや他アイテムと同一のY軸基準で正確に接地・整列するよう修正
+ * ・カメラ未選択時でも確実に立面図を描画するフォールバック対応
+ * ・コアエンジンの hitTest / handleDrag による1席単位の操作対応
+ * ・Z=0 (FL±0) を基準とした正確な立面図の接地描画
  */
 
 (function () {
   'use strict';
 
+  // ==========================================
+  // グローバルデータ共有
+  // ==========================================
   window.seats = window.seats || [];
-  window.chair = window.chair || { w: 480, d: 480, h: 420, backH: 400 };
-  window.seatedTorsoH = window.seatedTorsoH || 850;
+  window.chair = window.chair || { w: 480, d: 480, h: 450, backH: 400 };
+  window.seatedTorsoH = window.seatedTorsoH || 820; // デフォルト 450 + 820 = 1270
   window.totalHeadZ = window.totalHeadZ || 1270;
   window.seatTool = window.seatTool || 'select';
 
@@ -18,9 +22,11 @@
     init: function () {
       this.injectUI();
       this.bindEvents();
-      this.hookEngineRender();
     },
 
+    // ==========================================
+    // UI自動注入
+    // ==========================================
     injectUI: function () {
       const panel = document.getElementById('panel-seats');
       if (!panel) return;
@@ -34,10 +40,10 @@
             </span>
           </div>
           <div class="ui-row">
-            <button class="btn-action active" id="tool-select" style="flex:1;">👆 選択・範囲</button>
-            <button class="btn-action" id="tool-move" style="flex:1;">↔️ ドラッグ</button>
-            <button class="btn-action" id="tool-delete" style="flex:1;">❌ 1席削除</button>
-            <button class="btn-action" id="tool-add" style="flex:1;">➕ 1席追加</button>
+            <button class="btn-action active" id="tool-select" data-tool="select" style="flex:1;">👆 選択</button>
+            <button class="btn-action" id="tool-move" data-tool="move" style="flex:1;">↔️ ドラッグ</button>
+            <button class="btn-action" id="tool-delete" data-tool="delete" style="flex:1;">❌ 1席削除</button>
+            <button class="btn-action" id="tool-add" data-tool="add" style="flex:1;">➕ 1席追加</button>
           </div>
         </div>
 
@@ -51,11 +57,11 @@
           </div>
           <div class="ui-row" style="margin-top:6px;">
             <div class="input-box">
-              <label style="color:#b91c1c; font-weight:bold;">観客の座高 (頭頂まで)</label>
+              <label style="color:#b91c1c; font-weight:bold;">観客の座高</label>
               <input type="number" id="seatedTorsoH" value="${window.seatedTorsoH}" step="10">
             </div>
             <div class="input-box">
-              <label style="color:#b91c1c; font-weight:bold;">前席頭頂高 (Z合計)</label>
+              <label style="color:#b91c1c; font-weight:bold;">前席頭頂高(Z)</label>
               <input type="number" id="seatedTotalHeadZ" value="${window.totalHeadZ}" step="10">
             </div>
           </div>
@@ -89,13 +95,16 @@
             <input type="range" id="seatAngleSlider" min="-180" max="180" step="5" value="0">
           </div>
           <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-top:6px;">
-            <button type="button" class="btn-action" style="font-size:10px; padding:4px; background:#f0fdf4; border-color:#16a34a; color:#15803d;" id="btn-align-line">📏 選択席を1直線に連結整列</button>
+            <button type="button" class="btn-action" style="font-size:10px; padding:4px; background:#f0fdf4; border-color:#16a34a; color:#15803d;" id="btn-align-line">📏 選択席を1直線に整列</button>
             <button type="button" class="btn-action" style="font-size:10px; padding:4px; background:#eff6ff; border-color:#2563eb; color:#1d4ed8;" id="btn-aim-center">🎯 ステージ中央に向ける</button>
           </div>
         </div>
       `;
     },
 
+    // ==========================================
+    // イベントバインド
+    // ==========================================
     bindEvents: function () {
       const self = this;
       
@@ -103,67 +112,81 @@
       tools.forEach(t => {
         const btn = document.getElementById('tool-' + t);
         if (btn) {
-          btn.onclick = () => {
+          btn.addEventListener('click', () => {
             window.seatTool = t;
             tools.forEach(tx => document.getElementById('tool-' + tx)?.classList.remove('active'));
             btn.classList.add('active');
-          };
+          });
         }
       });
 
       ['chairW', 'chairD', 'chairH', 'chairBackH'].forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.onchange = (e) => {
+        if (el) el.addEventListener('change', (e) => {
           if (window.saveHistory) window.saveHistory();
           window.chair[id.replace('chair', '').toLowerCase()] = parseFloat(e.target.value) || 480;
           if (id === 'chairH') self.updateHeadZ();
           self.requestGlobalRender();
-        };
+        });
       });
 
-      document.getElementById('seatedTorsoH').onchange = (e) => {
-        if (window.saveHistory) window.saveHistory();
-        window.seatedTorsoH = parseFloat(e.target.value) || 850;
-        self.updateHeadZ();
-      };
+      const seatedTorsoEl = document.getElementById('seatedTorsoH');
+      if (seatedTorsoEl) {
+        seatedTorsoEl.addEventListener('change', (e) => {
+          if (window.saveHistory) window.saveHistory();
+          window.seatedTorsoH = parseFloat(e.target.value) || 820;
+          self.updateHeadZ();
+        });
+      }
       
-      document.getElementById('seatedTotalHeadZ').onchange = (e) => {
-        if (window.saveHistory) window.saveHistory();
-        window.totalHeadZ = parseFloat(e.target.value) || 1270;
-        window.seatedTorsoH = Math.max(400, window.totalHeadZ - window.chair.h);
-        document.getElementById('seatedTorsoH').value = Math.round(window.seatedTorsoH);
-        self.requestGlobalRender();
-      };
+      const headZEl = document.getElementById('seatedTotalHeadZ');
+      if (headZEl) {
+        headZEl.addEventListener('change', (e) => {
+          if (window.saveHistory) window.saveHistory();
+          window.totalHeadZ = parseFloat(e.target.value) || 1270;
+          window.seatedTorsoH = Math.max(400, window.totalHeadZ - window.chair.h);
+          if (document.getElementById('seatedTorsoH')) {
+            document.getElementById('seatedTorsoH').value = Math.round(window.seatedTorsoH);
+          }
+          self.requestGlobalRender();
+        });
+      }
 
       ['rows', 'rowPitch', 'blockCols', 'seatPitch', 'aisleW', 'stageDist'].forEach(id => {
         const el = document.getElementById(id);
         if (el) {
-          el.onchange = () => self.rebuildSeats();
-          el.onkeyup = (e) => { if (e.key === 'Enter') self.rebuildSeats(); };
+          el.addEventListener('change', () => self.rebuildSeats());
+          el.addEventListener('keyup', (e) => { if (e.key === 'Enter') self.rebuildSeats(); });
         }
       });
-      document.getElementById('btn-rebuild-seats').onclick = () => self.rebuildSeats();
+
+      const rebuildBtn = document.getElementById('btn-rebuild-seats');
+      if (rebuildBtn) rebuildBtn.addEventListener('click', () => self.rebuildSeats());
 
       const angleSlider = document.getElementById('seatAngleSlider');
       if (angleSlider) {
-        angleSlider.oninput = (e) => {
+        angleSlider.addEventListener('input', (e) => {
           const val = parseFloat(e.target.value) || 0;
-          document.getElementById('seatAngleValDisplay').innerText = val + '°';
+          const display = document.getElementById('seatAngleValDisplay');
+          if (display) display.innerText = val + '°';
           const targetSeats = self.getSelectedOrSingleSeats();
           if (targetSeats.length > 0) {
             targetSeats.forEach(s => s.angle = val);
             self.requestGlobalRender();
           }
-        };
+        });
       }
 
-      document.getElementById('btn-aim-center').onclick = () => self.aimSelectedSeatsToStageCenter();
-      document.getElementById('btn-align-line').onclick = () => self.alignSelectedSeats();
+      const aimBtn = document.getElementById('btn-aim-center');
+      if (aimBtn) aimBtn.addEventListener('click', () => self.aimSelectedSeatsToStageCenter());
+      const alignBtn = document.getElementById('btn-align-line');
+      if (alignBtn) alignBtn.addEventListener('click', () => self.alignSelectedSeats());
     },
 
     updateHeadZ: function () {
       window.totalHeadZ = window.chair.h + window.seatedTorsoH;
-      document.getElementById('seatedTotalHeadZ').value = Math.round(window.totalHeadZ);
+      const el = document.getElementById('seatedTotalHeadZ');
+      if (el) el.value = Math.round(window.totalHeadZ);
       this.requestGlobalRender();
     },
 
@@ -172,6 +195,7 @@
       const room = window.room || { w: 14000, d: 26000 };
       const stage = window.stage || { x: 2000, y: 1200, w: 10000, d: 3000 };
       
+      // 単一データ源を破棄・再生成
       if (window.seats) window.seats.length = 0; else window.seats = [];
       
       const rows = parseInt(document.getElementById('rows').value) || 16;
@@ -203,7 +227,7 @@
         });
       }
       this.updateSeatCount();
-      if (typeof window.updateMonitorSimCard === 'function') window.updateMonitorSimCard();
+      if (typeof window.updateStats === 'function') window.updateStats();
       this.requestGlobalRender();
     },
 
@@ -274,8 +298,10 @@
       const targetSeats = this.getSelectedOrSingleSeats();
       if (targetSeats.length === 1) {
         label.innerText = `選択中: ${targetSeats[0].id}`;
-        document.getElementById('seatAngleSlider').value = targetSeats[0].angle || 0;
-        document.getElementById('seatAngleValDisplay').innerText = `${targetSeats[0].angle || 0}°`;
+        const slider = document.getElementById('seatAngleSlider');
+        if(slider) slider.value = targetSeats[0].angle || 0;
+        const display = document.getElementById('seatAngleValDisplay');
+        if(display) display.innerText = `${targetSeats[0].angle || 0}°`;
       } else if (targetSeats.length > 1) {
         label.innerText = `複数選択中 (${targetSeats.length}席を一括回転)`;
       } else {
@@ -288,29 +314,63 @@
       else if (typeof window.render === 'function') window.render();
     },
 
-    hookEngineRender: function () {
-      const self = this;
-      window.updateSeatAngleUI = function () { self.updateSeatAngleUI(); };
-      window.updateSeatCountBadge = function () { self.updateSeatCount(); };
+    // ==========================================
+    // コアエンジン連動用 API (hitTest / handleDrag)
+    // ==========================================
+    hitTest: function(wx, wy) {
+      if ((window.viewMode || 'top') !== 'top') return null;
+      if (!window.seats) return null;
 
-      const originalRender = window.render;
-      if (typeof originalRender === 'function') {
-        window.render = function () {
-          originalRender();
-          
-          if (window.__seatsRenderHookedByCore) return;
-          const ctx = document.getElementById('simCanvas')?.getContext('2d');
-          if (!ctx) return;
+      const chairW = window.chair ? window.chair.w : 480;
+      let hit = null;
+      
+      // 手前に描画されたものから判定
+      for (let i = window.seats.length - 1; i >= 0; i--) {
+        const s = window.seats[i];
+        if (Math.hypot(s.x - wx, s.y - wy) < chairW / 1.5) {
+          hit = s;
+          break;
+        }
+      }
 
-          ctx.save();
-          // ★修正点1: window.scaleの未定義チェックを追加。これがないと平面図が消滅します
-          if (typeof window.panX !== 'undefined' && typeof window.scale !== 'undefined') {
-            ctx.translate(window.panX, window.panY);
-            ctx.scale(window.scale, window.scale);
-          }
-          if ((window.viewMode || 'top') === 'top') self.drawTop(ctx); else self.drawSide(ctx);
-          ctx.restore();
-        };
+      if (window.seatTool === 'delete') {
+        if (hit) {
+          window.seats = window.seats.filter(s => s.id !== hit.id);
+          if (window.saveHistory) window.saveHistory();
+          this.updateSeatCount();
+          if (typeof window.updateStats === 'function') window.updateStats();
+          this.requestGlobalRender();
+        }
+        return null;
+      }
+
+      if (window.seatTool === 'add') {
+        const newId = `Custom-${Date.now()}`;
+        window.seats.push({ id: newId, row: 0, x: wx, y: wy, angle: 0 });
+        if (window.saveHistory) window.saveHistory();
+        this.updateSeatCount();
+        if (typeof window.updateStats === 'function') window.updateStats();
+        this.requestGlobalRender();
+        return null;
+      }
+
+      if (window.seatTool === 'select' || window.seatTool === 'move') {
+        window.selectedSeat = hit;
+        this.updateSeatAngleUI();
+        if (hit && window.seatTool === 'move') {
+          return hit; // ドラッグ対象としてコアエンジンに返す
+        }
+        if (hit) {
+          this.requestGlobalRender();
+        }
+      }
+      return null;
+    },
+
+    handleDrag: function(target, wx, wy) {
+      if (window.seatTool === 'move' && target) {
+        target.x = wx;
+        target.y = wy;
       }
     },
 
@@ -318,7 +378,11 @@
     // 【平面図】客席描画
     // ==========================================
     drawTop: function (ctx) {
-      if (!window.seats) return;
+      if (!window.seats || window.seats.length === 0) return;
+      
+      const chairW = window.chair ? window.chair.w : 480;
+      const chairD = window.chair ? window.chair.d : 480;
+
       window.seats.forEach(s => {
         const isSel = (window.selectedSeat && window.selectedSeat.id === s.id) || 
                       (window.selectedItems && window.selectedItems.some(i => i.type === 'seat' && i.id === s.id));
@@ -329,36 +393,74 @@
         ctx.fillStyle = isSel ? '#60a5fa' : '#cbd5e1';
         ctx.strokeStyle = isSel ? '#2563eb' : '#64748b';
         ctx.lineWidth = 6;
-        ctx.fillRect(-window.chair.w/2, -window.chair.d/2, window.chair.w, window.chair.d);
-        ctx.strokeRect(-window.chair.w/2, -window.chair.d/2, window.chair.w, window.chair.d);
+        ctx.fillRect(-chairW/2, -chairD/2, chairW, chairD);
+        ctx.strokeRect(-chairW/2, -chairD/2, chairW, chairD);
         
         ctx.fillStyle = isSel ? '#3b82f6' : '#94a3b8';
-        ctx.fillRect(-window.chair.w/2, window.chair.d/2 - 40, window.chair.w, 40);
-        ctx.strokeRect(-window.chair.w/2, window.chair.d/2 - 40, window.chair.w, 40);
+        ctx.fillRect(-chairW/2, chairD/2 - 40, chairW, 40);
+        ctx.strokeRect(-chairW/2, chairD/2 - 40, chairW, 40);
         ctx.restore();
       });
     },
 
     // ==========================================
-    // 【立面図】客席断面・人物シルエット描画
+    // 【立面図】客席スライス抽出と断面描画
     // ==========================================
-    getSideViewSliceSeats: function (cam, aim) {
-      if (!cam || !aim) return [];
+    getSideViewSliceSeats: function (sliceX) {
+      if (!window.seats || window.seats.length === 0) return [];
       const chairW = window.chair ? window.chair.w : 480;
-      const dx = aim.targetX - cam.x;
-      const dy = aim.targetY - cam.y;
-      const len = Math.hypot(dx, dy);
-      if (len < 10) return [];
 
-      return window.seats.filter(s => {
-        const perpDist = Math.abs((s.x - cam.x) * dy - (s.y - cam.y) * dx) / len;
-        return perpDist <= chairW * 0.75; 
+      // 1. スライスの指定がある場合（core_engine から渡された sliceX）
+      if (typeof sliceX === 'number' && !isNaN(sliceX)) {
+        const matched = window.seats.filter(s => Math.abs(s.x - sliceX) <= chairW * 0.75);
+        if (matched.length > 0) return matched;
+      }
+
+      // 2. カメラがある場合（カメラの光軸）
+      const selCam = window.cameras ? window.cameras.find(c => c.id === window.selectedCamId) : null;
+      if (selCam && typeof window.getCameraAimAndFov === 'function') {
+        const aimInfo = window.getCameraAimAndFov(selCam);
+        if (aimInfo) {
+          const dx = aimInfo.targetX - selCam.x;
+          const dy = aimInfo.targetY - selCam.y;
+          const len = Math.hypot(dx, dy);
+          if (len > 10) {
+            const seatsInRay = window.seats.filter(s => {
+              const perpDist = Math.abs((s.x - selCam.x) * dy - (s.y - selCam.y) * dx) / len;
+              return perpDist <= chairW * 0.75;
+            });
+            if (seatsInRay.length > 0) return seatsInRay;
+          }
+        }
+      }
+
+      // 3. 座席単一選択がある場合
+      if (window.selectedSeat) {
+        const selX = window.selectedSeat.x;
+        const matched = window.seats.filter(s => Math.abs(s.x - selX) <= chairW * 0.75);
+        if (matched.length > 0) return matched;
+      }
+
+      // 4. フォールバック（デフォルト）：会場のX軸中央付近
+      const roomW = (window.room && window.room.w) ? window.room.w : 14000;
+      const midX = roomW / 2;
+      let closestX = midX;
+      let minDiff = Infinity;
+      window.seats.forEach(s => {
+        const diff = Math.abs(s.x - midX);
+        if (diff < minDiff) { minDiff = diff; closestX = s.x; }
       });
+
+      return window.seats.filter(s => Math.abs(s.x - closestX) <= chairW * 0.75);
     },
 
-    calculateBlockedSliceSeats: function (sliceSeats, selCam, aimInfo) {
+    calculateBlockedSliceSeats: function (sliceSeats) {
       const blockedSet = new Set();
-      if (!selCam || !aimInfo) return blockedSet;
+      const selCam = window.cameras ? window.cameras.find(c => c.id === window.selectedCamId) : null;
+      if (!selCam || typeof window.getCameraAimAndFov !== 'function') return blockedSet;
+
+      const aimInfo = window.getCameraAimAndFov(selCam);
+      if (!aimInfo) return blockedSet;
 
       const hFovRad = (aimInfo.fov * Math.PI) / 180;
       const vFovRad = 2 * Math.atan(Math.tan(hFovRad / 2) * (9 / 16));
@@ -367,14 +469,16 @@
       const thetaLower = Math.atan2(dz, dy) - vFovRad / 2;
       
       const stage = window.stage || { x: 2000, y: 1200, w: 10000, d: 3000, h: 800 };
+      const cHeight = window.chair ? window.chair.h : 450;
+      const torsoHeight = window.seatedTorsoH || 820;
 
       sliceSeats.forEach(s => {
         if (s.y < selCam.y && s.y > aimInfo.targetY) {
-          // 正確なZ軸の高さを割り出してカメラレイと交差判定する
-          const isInsideStage = (s.x >= stage.x && s.x <= stage.x + stage.w &&
-                                 s.y >= stage.y && s.y <= stage.y + stage.d);
+          const isInsideStage = window.isInsideStage ? window.isInsideStage(s.x, s.y) :
+                               (s.x >= stage.x && s.x <= stage.x + stage.w &&
+                                s.y >= stage.y && s.y <= stage.y + stage.d);
           const baseZ = isInsideStage ? (stage.h || 800) : 0;
-          const actualHeadZ = baseZ + window.chair.h + window.seatedTorsoH;
+          const actualHeadZ = baseZ + cHeight + torsoHeight;
 
           const distFromCam = selCam.y - s.y;
           const rayZAtSeat = selCam.lensH + distFromCam * Math.tan(thetaLower);
@@ -387,60 +491,61 @@
       return blockedSet;
     },
 
-    drawSide: function (tCtx) {
+    drawSide: function (tCtx, sliceX) {
       if (!window.seats || window.seats.length === 0) return;
       const self = this;
-      
-      const selCam = window.cameras ? window.cameras.find(c => c.id === window.selectedCamId) : null;
-      let aimInfo = null;
-      if (selCam && typeof window.getCameraAimAndFov === 'function') {
-        aimInfo = window.getCameraAimAndFov(selCam);
-      }
-      if (!selCam || !aimInfo) return;
 
-      const sliceSeats = this.getSideViewSliceSeats(selCam, aimInfo);
+      // カメラがなくても必ず描画されるようにフォールバック抽出
+      const sliceSeats = this.getSideViewSliceSeats(sliceX);
       if (sliceSeats.length === 0) return;
 
-      const blockedSeatIds = this.calculateBlockedSliceSeats(sliceSeats, selCam, aimInfo);
+      const blockedSeatIds = this.calculateBlockedSliceSeats(sliceSeats);
       const stage = window.stage || { x: 2000, y: 1200, w: 10000, d: 3000, h: 800 };
+      
+      const cD = window.chair ? window.chair.d : 480;
+      const cH = window.chair ? window.chair.h : 450;
+      const cBackH = window.chair ? window.chair.backH : 400;
+      const torsoH = window.seatedTorsoH || 820;
 
       tCtx.save();
       sliceSeats.forEach(s => {
-        // ★修正点2: 斜め投影を廃止し、純粋なY座標(奥行き)を横軸にすることで、コアエンジンのステージやテーブルと位置をピッタリ合わせる
         const py = s.y;
         const isBlocked = blockedSeatIds.has(s.id);
         const isSel = (window.selectedSeat && window.selectedSeat.id === s.id) ||
                       (window.selectedItems && window.selectedItems.some(i => i.type === 'seat' && i.id === s.id));
 
-        const isInsideStage = (s.x >= stage.x && s.x <= stage.x + stage.w &&
-                               s.y >= stage.y && s.y <= stage.y + stage.d);
+        const isInsideStage = window.isInsideStage ? window.isInsideStage(s.x, s.y) :
+                             (s.x >= stage.x && s.x <= stage.x + stage.w &&
+                              s.y >= stage.y && s.y <= stage.y + stage.d);
         const baseZ = isInsideStage ? (stage.h || 800) : 0;
 
         tCtx.strokeStyle = isBlocked ? '#dc2626' : (isSel ? '#2563eb' : '#475569');
         tCtx.lineWidth = isBlocked ? 35 : 25;
 
-        // ★修正点3: 椅子の脚を完全に床面(baseZ)まで伸ばし、浮遊を解消
-        tCtx.strokeRect(py - window.chair.d / 2, -baseZ - window.chair.h, window.chair.d, 30); 
+        // 椅子の脚を完全に床またはステージ面 (baseZ) まで接地させる
+        tCtx.strokeRect(py - cD / 2, -baseZ - cH, cD, 30); 
         tCtx.beginPath();
-        tCtx.moveTo(py - window.chair.d / 2 + 40, -baseZ - window.chair.h);
-        tCtx.lineTo(py - window.chair.d / 2 + 40, -baseZ); // 前脚
-        tCtx.moveTo(py + window.chair.d / 2 - 40, -baseZ - window.chair.h);
-        tCtx.lineTo(py + window.chair.d / 2 - 40, -baseZ); // 後脚
-        tCtx.moveTo(py + window.chair.d / 2 - 40, -baseZ - window.chair.h);
-        tCtx.lineTo(py + window.chair.d / 2 - 40, -baseZ - window.chair.h - window.chair.backH); // 背もたれ
+        tCtx.moveTo(py - cD / 2 + 40, -baseZ - cH);
+        tCtx.lineTo(py - cD / 2 + 40, -baseZ); // 前脚
+        tCtx.moveTo(py + cD / 2 - 40, -baseZ - cH);
+        tCtx.lineTo(py + cD / 2 - 40, -baseZ); // 後脚
+        tCtx.moveTo(py + cD / 2 - 40, -baseZ - cH);
+        tCtx.lineTo(py + cD / 2 - 40, -baseZ - cH - cBackH); // 背もたれ
         tCtx.stroke();
 
+        // 観客シルエット
         tCtx.fillStyle = isBlocked ? '#dc2626' : (isSel ? '#2563eb' : '#334155');
         if (typeof window.drawPersonSilhouette === 'function') {
-          window.drawPersonSilhouette(tCtx, py, baseZ + window.chair.h, window.seatedTorsoH, true, -1);
+          window.drawPersonSilhouette(tCtx, py, baseZ + cH, torsoH, true, -1);
         } else {
-          self.drawFallbackSeatedPerson(tCtx, py, baseZ + window.chair.h, window.seatedTorsoH, isBlocked, baseZ);
+          self.drawFallbackSeatedPerson(tCtx, py, baseZ + cH, torsoH, isBlocked, baseZ);
         }
 
+        // 座席番号ラベル
         tCtx.fillStyle = isBlocked ? '#dc2626' : '#64748b';
         tCtx.font = 'bold 130px sans-serif';
         tCtx.textAlign = 'center';
-        tCtx.fillText(s.id, py, -(baseZ + window.chair.h + window.seatedTorsoH) - 90);
+        tCtx.fillText(s.id, py, -(baseZ + cH + torsoH) - 90);
       });
 
       // 前席頭頂高ライン（破線ガイド）
@@ -452,8 +557,9 @@
         const sortedSeats = [...sliceSeats].sort((a,b) => a.y - b.y);
         sortedSeats.forEach((s, idx) => {
           const py = s.y;
-          const isInsideStage = (s.x >= stage.x && s.x <= stage.x + stage.w && s.y >= stage.y && s.y <= stage.y + stage.d);
-          const currentZ = -((isInsideStage ? (stage.h||800) : 0) + window.chair.h + window.seatedTorsoH);
+          const isInsideStage = window.isInsideStage ? window.isInsideStage(s.x, s.y) :
+                               (s.x >= stage.x && s.x <= stage.x + stage.w && s.y >= stage.y && s.y <= stage.y + stage.d);
+          const currentZ = -((isInsideStage ? (stage.h||800) : 0) + cH + torsoH);
           if (idx === 0) { tCtx.moveTo(py - 500, currentZ); tCtx.lineTo(py, currentZ); } 
           else { tCtx.lineTo(py, currentZ); }
           if (idx === sortedSeats.length - 1) tCtx.lineTo(py + 500, currentZ);
@@ -481,14 +587,19 @@
       ctx.fill();
 
       ctx.fillRect(py - 140, -seatTopZ - 30, 180, 40);
-      // 脚を床(baseZ)まで確実に伸ばす
       ctx.fillRect(py - 140, -seatTopZ, 40, seatTopZ - baseZ);
       ctx.restore();
     },
 
     exportData: function () {
-      return { seats: window.seats, chair: window.chair, seatedTorsoH: window.seatedTorsoH, totalHeadZ: window.totalHeadZ };
+      return { 
+        seats: window.seats, 
+        chair: window.chair, 
+        seatedTorsoH: window.seatedTorsoH, 
+        totalHeadZ: window.totalHeadZ 
+      };
     },
+    
     importData: function (data) {
       if (data) {
         if (data.seats) window.seats = data.seats;
@@ -497,11 +608,15 @@
         if (data.totalHeadZ) window.totalHeadZ = data.totalHeadZ;
         this.updateSeatCount();
         this.updateHeadZ();
+        
         const cw = document.getElementById('chairW');
         if (cw) {
-          cw.value = window.chair.w; document.getElementById('chairD').value = window.chair.d;
-          document.getElementById('chairH').value = window.chair.h; document.getElementById('chairBackH').value = window.chair.backH;
-          document.getElementById('seatedTorsoH').value = window.seatedTorsoH; document.getElementById('seatedTotalHeadZ').value = window.totalHeadZ;
+          cw.value = window.chair.w; 
+          document.getElementById('chairD').value = window.chair.d;
+          document.getElementById('chairH').value = window.chair.h; 
+          document.getElementById('chairBackH').value = window.chair.backH;
+          document.getElementById('seatedTorsoH').value = window.seatedTorsoH; 
+          document.getElementById('seatedTotalHeadZ').value = window.totalHeadZ;
         }
         this.requestGlobalRender();
       }

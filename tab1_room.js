@@ -4,10 +4,13 @@
  * モジュール：【ノート1：会場】 tab1_room.js
  * 
  * 担当機能：
- *  - 会場基本寸法（幅×奥行）
+ *  - 会場基本寸法（W: 16000, D: 24000, H: 5000）
  *  - 多角形成形（正多角形・L字プリセット、辺の増減、頂点マウスドラッグ）
  *  - 壁吸着扉（片開き左右、両開き、閉鎖、壁面スナップ・スライドドラッグ）
- *  - 平面図（外郭・寸法線・扉）・立面図（床・天井境界）レンダリング
+ *  - 平面図（外郭線・頂点ハンドル・扉円弧・外周CAD寸法線）描画
+ *  - 立面図（横軸=Y、縦軸=-Z の統一座標系による床面・天井・奥壁断面）描画
+ *  - hitTest / handleDrag によるマウスドラッグ操作
+ *  - exportData / importData による Undo / Redo 完全連動
  * ============================================================================
  */
 
@@ -15,33 +18,30 @@
   'use strict';
 
   // ==========================================================================
-  // 1. データモデル初期化 (共通グローバル空間への登録)
+  // 1. 単一データ源（Single Source of Truth）初期化
   // ==========================================================================
-  window.room = window.room || {
-    w: 14000,
-    d: 26000,
-    ceilingH: 5000, // 天井高 (mm)
-    shapeType: 'rect', // 'rect' | 'polygon'
-    points: [
-      { x: 0, y: 0 },
-      { x: 14000, y: 0 },
-      { x: 14000, y: 26000 },
-      { x: 0, y: 26000 }
-    ],
-    edges: [
-      { len: 14000, angle: 0 },
-      { len: 26000, angle: 90 },
-      { len: 14000, angle: 180 },
-      { len: 26000, angle: 270 }
-    ]
-  };
+  window.room = window.room || {};
+  if (typeof window.room.w !== 'number') window.room.w = 16000;
+  if (typeof window.room.d !== 'number') window.room.d = 24000;
+  if (typeof window.room.h !== 'number') window.room.h = window.room.ceilingH || 5000;
+  window.room.ceilingH = window.room.h; // 互換性保持
+  if (!window.room.shapeType) window.room.shapeType = 'rect';
 
+  if (!Array.isArray(window.room.points) || window.room.points.length < 3) {
+    window.room.points = [
+      { x: 0, y: 0 },
+      { x: window.room.w, y: 0 },
+      { x: window.room.w, y: window.room.d },
+      { x: 0, y: window.room.d }
+    ];
+  }
+
+  // 扉データ (壁面吸着スナップ方式: edgeIndex と offsetRatio 0.05〜0.95 で密着)
   window.doors = window.doors || [
     { id: 'D1', name: '正面主搬入口', type: 'double', width: 1800, edgeIndex: 2, offsetRatio: 0.5, status: 'open' },
     { id: 'D2', name: '上手袖扉', type: 'single_left', width: 900, edgeIndex: 1, offsetRatio: 0.15, status: 'open' }
   ];
-
-  window.selectedDoorId = window.selectedDoorId || 'D1';
+  window.selectedDoorId = window.selectedDoorId || (window.doors[0] ? window.doors[0].id : 'D1');
 
   // ==========================================================================
   // 2. UIテンプレート自動生成 (#panel-room へのインジェクション)
@@ -51,29 +51,29 @@
     if (!container) return;
 
     container.innerHTML = `
-      <!-- 会場基本寸法 -->
+      <!-- 会場外形 & 天井高 -->
       <div class="ui-group">
         <div class="ui-group-title">
-          <span>🏛 会場外形 & 形状タイプ</span>
+          <span>🏛 会場外形 & 天井高</span>
           <select id="roomShapeType" style="font-size:11px; padding:1px 4px;">
             <option value="rect" ${window.room.shapeType === 'rect' ? 'selected' : ''}>四角形 (基本)</option>
             <option value="polygon" ${window.room.shapeType === 'polygon' ? 'selected' : ''}>多角形成形 (カスタム)</option>
           </select>
         </div>
 
-        <!-- 四角形寸法 -->
+        <!-- 基本寸法入力 -->
         <div class="ui-row" id="roomBasicDimsRow" style="${window.room.shapeType === 'polygon' ? 'display:none;' : ''}">
           <div class="input-box">
-            <label>間口幅 (X mm)</label>
+            <label>間口幅 (W mm)</label>
             <input type="number" id="roomW" value="${window.room.w}" step="500">
           </div>
           <div class="input-box">
-            <label>奥行 (Y mm)</label>
+            <label>奥行 (D mm)</label>
             <input type="number" id="roomD" value="${window.room.d}" step="500">
           </div>
           <div class="input-box">
-            <label>天井高 (CH mm)</label>
-            <input type="number" id="roomCH" value="${window.room.ceilingH}" step="100">
+            <label>天井高 (H mm)</label>
+            <input type="number" id="roomH" value="${window.room.h}" step="100">
           </div>
         </div>
 
@@ -91,13 +91,17 @@
                 <option value="L">L字型 (変形6角形)</option>
               </select>
             </div>
-            <div class="input-box" style="justify-content:flex-end; gap:4px;">
-              <button class="btn-action" id="btnAddVertex" style="font-size:10px; padding:3px 6px;">＋ 頂点追加</button>
-              <button class="btn-action" id="btnResetRect" style="font-size:10px; padding:3px 6px; background:#f1f5f9; color:#0369a1;">四角リセット</button>
+            <div class="input-box">
+              <label>天井高 (H mm)</label>
+              <input type="number" id="roomHPoly" value="${window.room.h}" step="100">
             </div>
           </div>
+          <div class="ui-row full" style="justify-content:flex-end; gap:6px; margin-top:4px;">
+            <button class="btn-action" id="btnAddVertex" style="font-size:10px; padding:3px 8px;">＋ 頂点追加</button>
+            <button class="btn-action" id="btnResetRect" style="font-size:10px; padding:3px 8px; background:#f1f5f9; color:#0369a1;">四角リセット</button>
+          </div>
           <div style="font-size:10px; color:#64748b; margin-top:4px;">
-            💡 図面上の「青丸ハンドル」をマウスドラッグして自由に角を曲げられます。
+            💡 図面上の「青丸ハンドル」をマウスドラッグして会場の角を自由に変形できます。
           </div>
         </div>
       </div>
@@ -147,7 +151,7 @@
             </div>
           </div>
 
-          <div class="ui-row">
+          <div class="ui-row full">
             <div class="input-box" style="flex:1;">
               <label>壁上の位置: <span id="doorRatioDisplay" style="font-weight:bold; color:#0284c7;">50%</span></label>
               <input type="range" id="doorWallRatio" min="5" max="95" step="1" value="50">
@@ -155,15 +159,14 @@
           </div>
 
           <div style="font-size:10px; color:#64748b; margin-top:2px;">
-            💡 図面上の扉をドラッグすると、最寄りの壁に自動吸着してスライドします。
+            💡 図面上の扉をドラッグすると、最寄りの壁に自動吸着してスライド移動します。
           </div>
         </div>
       </div>
     `;
 
     bindRoomUIEvents();
-    updateDoorUIList();
-    updateDoorWallSelectOptions();
+    syncUI();
   }
 
   // ==========================================================================
@@ -182,16 +185,19 @@
         applyPolygonPreset('4');
       }
       recalculateRoomBounds();
-      updateDoorWallSelectOptions();
+      syncUI();
       triggerRender();
     });
 
     // 四角形寸法変更
     const onDimChange = function () {
       pushUndo();
-      window.room.w = parseFloat(document.getElementById('roomW').value) || 14000;
-      window.room.d = parseFloat(document.getElementById('roomD').value) || 26000;
-      window.room.ceilingH = parseFloat(document.getElementById('roomCH').value) || 5000;
+      window.room.w = parseFloat(document.getElementById('roomW').value) || 16000;
+      window.room.d = parseFloat(document.getElementById('roomD').value) || 24000;
+      const hVal = parseFloat(document.getElementById('roomH').value) || 5000;
+      window.room.h = hVal;
+      window.room.ceilingH = hVal;
+
       if (window.room.shapeType === 'rect') {
         window.room.points = [
           { x: 0, y: 0 },
@@ -201,13 +207,23 @@
         ];
       }
       recalculateRoomBounds();
-      updateDoorWallSelectOptions();
+      syncUI();
       triggerRender();
     };
 
     document.getElementById('roomW').addEventListener('change', onDimChange);
     document.getElementById('roomD').addEventListener('change', onDimChange);
-    document.getElementById('roomCH').addEventListener('change', onDimChange);
+    document.getElementById('roomH').addEventListener('change', onDimChange);
+
+    // 多角形時の天井高
+    document.getElementById('roomHPoly').addEventListener('change', function (e) {
+      pushUndo();
+      const val = parseFloat(e.target.value) || 5000;
+      window.room.h = val;
+      window.room.ceilingH = val;
+      document.getElementById('roomH').value = val;
+      triggerRender();
+    });
 
     // 多角形プリセット
     document.getElementById('polyEdgeCount').addEventListener('change', function (e) {
@@ -215,7 +231,7 @@
       applyPolygonPreset(e.target.value);
     });
 
-    // 頂点追加 / リセット
+    // 頂点追加 / 四角リセット
     document.getElementById('btnAddVertex').addEventListener('click', function () {
       pushUndo();
       addPolygonVertex();
@@ -224,9 +240,6 @@
     document.getElementById('btnResetRect').addEventListener('click', function () {
       pushUndo();
       window.room.shapeType = 'rect';
-      document.getElementById('roomShapeType').value = 'rect';
-      document.getElementById('roomBasicDimsRow').style.display = 'grid';
-      document.getElementById('polygonConfigGroup').style.display = 'none';
       window.room.points = [
         { x: 0, y: 0 },
         { x: window.room.w, y: 0 },
@@ -234,11 +247,11 @@
         { x: 0, y: window.room.d }
       ];
       recalculateRoomBounds();
-      updateDoorWallSelectOptions();
+      syncUI();
       triggerRender();
     });
 
-    // 扉操作
+    // 扉の追加・削除・選択
     document.getElementById('btnAddDoor').addEventListener('click', addNewDoor);
     document.getElementById('btnDeleteDoor').addEventListener('click', deleteSelectedDoor);
     document.getElementById('doorSelect').addEventListener('change', function (e) {
@@ -247,6 +260,7 @@
       triggerRender();
     });
 
+    // 扉パラメータ変更
     const onDoorParamChange = function () {
       const d = window.doors.find(item => item.id === window.selectedDoorId);
       if (!d) return;
@@ -257,7 +271,7 @@
       d.edgeIndex = parseInt(document.getElementById('doorWallSelect').value, 10) || 0;
       d.offsetRatio = (parseFloat(document.getElementById('doorWallRatio').value) || 50) / 100;
       document.getElementById('doorRatioDisplay').innerText = Math.round(d.offsetRatio * 100) + '%';
-      updateDoorUIList();
+      updateDoorSelectOptions();
       triggerRender();
     };
 
@@ -272,7 +286,7 @@
   }
 
   // ==========================================================================
-  // 4. 多角形成形ロジック
+  // 4. 多角形成形幾何ロジック
   // ==========================================================================
   function applyPolygonPreset(preset) {
     const cx = window.room.w / 2;
@@ -284,13 +298,13 @@
       window.room.points = [
         { x: 0, y: 0 },
         { x: window.room.w, y: 0 },
-        { x: window.room.w, y: window.room.d * 0.55 },
-        { x: window.room.w * 0.45, y: window.room.d * 0.55 },
-        { x: window.room.w * 0.45, y: window.room.d },
+        { x: window.room.w, y: Math.round(window.room.d * 0.55) },
+        { x: Math.round(window.room.w * 0.45), y: Math.round(window.room.d * 0.55) },
+        { x: Math.round(window.room.w * 0.45), y: window.room.d },
         { x: 0, y: window.room.d }
       ];
     } else {
-      const n = parseInt(preset, 10);
+      const n = parseInt(preset, 10) || 4;
       const pts = [];
       for (let i = 0; i < n; i++) {
         const angle = (2 * Math.PI / n) * i - Math.PI / 2;
@@ -302,7 +316,7 @@
       window.room.points = pts;
     }
     recalculateRoomBounds();
-    updateDoorWallSelectOptions();
+    syncUI();
     triggerRender();
   }
 
@@ -316,7 +330,7 @@
       y: Math.round((last.y + first.y) / 2)
     });
     recalculateRoomBounds();
-    updateDoorWallSelectOptions();
+    syncUI();
     triggerRender();
   }
 
@@ -333,18 +347,29 @@
     window.room.w = Math.max(1000, maxX - minX);
     window.room.d = Math.max(1000, maxY - minY);
 
+    // 扉の壁番号が頂点数を超えないよう調整
+    const maxEdge = pts.length - 1;
+    window.doors.forEach(d => {
+      if (d.edgeIndex > maxEdge) d.edgeIndex = maxEdge;
+    });
+
+    updateHUDStats();
+  }
+
+  function updateHUDStats() {
     const rw = document.getElementById('roomW');
     const rd = document.getElementById('roomD');
     if (rw) rw.value = Math.round(window.room.w);
     if (rd) rd.value = Math.round(window.room.d);
 
-    // サマリー表示の更新
     const statRoom = document.getElementById('statRoom');
-    if (statRoom) statRoom.innerText = `${(window.room.w / 1000).toFixed(1)}m × ${(window.room.d / 1000).toFixed(1)}m`;
+    if (statRoom) {
+      statRoom.innerText = `${(window.room.w / 1000).toFixed(1)}m × ${(window.room.d / 1000).toFixed(1)}m`;
+    }
   }
 
   // ==========================================================================
-  // 5. 扉制御・幾何計算 (壁面吸着 & 最寄りスナップ)
+  // 5. 扉制御・壁面吸着スナップ
   // ==========================================================================
   function updateDoorWallSelectOptions() {
     const sel = document.getElementById('doorWallSelect');
@@ -359,7 +384,7 @@
     }
   }
 
-  function updateDoorUIList() {
+  function updateDoorSelectOptions() {
     const sel = document.getElementById('doorSelect');
     if (!sel) return;
     sel.innerHTML = '';
@@ -370,7 +395,6 @@
       sel.appendChild(opt);
     });
     sel.value = window.selectedDoorId;
-    syncSelectedDoorToUI();
   }
 
   function syncSelectedDoorToUI() {
@@ -399,13 +423,13 @@
       id: newId,
       name: `扉 ${window.doors.length + 1}`,
       type: 'single_left',
-      width: 1000,
+      width: 1200,
       edgeIndex: 0,
       offsetRatio: 0.5,
       status: 'open'
     });
     window.selectedDoorId = newId;
-    updateDoorUIList();
+    syncUI();
     triggerRender();
   }
 
@@ -417,11 +441,10 @@
     pushUndo();
     window.doors = window.doors.filter(d => d.id !== window.selectedDoorId);
     window.selectedDoorId = window.doors[0].id;
-    updateDoorUIList();
+    syncUI();
     triggerRender();
   }
 
-  // 辺の始点・終点と比率から扉の絶対座標と壁の角度を計算
   function getDoorTransform(door) {
     const pts = window.room.points;
     const n = pts.length;
@@ -437,7 +460,6 @@
     return { x, y, angle, length: Math.hypot(p2.x - p1.x, p2.y - p1.y) };
   }
 
-  // マウス座標から最も近い壁（辺）を探してスナップ＆比率を算出
   function snapDoorToNearestEdge(door, wx, wy) {
     const pts = window.room.points;
     const n = pts.length;
@@ -470,7 +492,7 @@
   }
 
   // ==========================================================================
-  // 6. 描画エンジン連動 (平面図 Top / 立面図 Side)
+  // 6. 描画連動: drawTop(ctx) & drawSide(ctx, sliceX)
   // ==========================================================================
   function drawRoomTop(ctx) {
     const pts = window.room.points;
@@ -494,7 +516,7 @@
     ctx.lineJoin = 'miter';
     ctx.stroke();
 
-    // 3. 多角形頂点ハンドル (カスタム時のみ)
+    // 3. 多角形頂点ハンドル (多角形モード時)
     if (window.room.shapeType === 'polygon') {
       pts.forEach((pt, i) => {
         ctx.fillStyle = '#0284c7';
@@ -513,34 +535,37 @@
       });
     }
 
-    // 4. 外郭CAD寸法線
+    // 4. 外周CAD寸法線 (間口W・奥行D)
     ctx.strokeStyle = '#94a3b8';
     ctx.lineWidth = 15;
     ctx.fillStyle = '#64748b';
     ctx.font = 'bold 120px sans-serif';
 
-    // 間口(上部寸法)
+    // 間口 W (上部寸法)
     ctx.beginPath();
     ctx.moveTo(0, -300); ctx.lineTo(window.room.w, -300);
     ctx.moveTo(0, -450); ctx.lineTo(0, -150);
     ctx.moveTo(window.room.w, -450); ctx.lineTo(window.room.w, -150);
     ctx.stroke();
     ctx.textAlign = 'center';
-    ctx.fillText(`間口 W: ${(window.room.w / 1000).toFixed(2)}m`, window.room.w / 2, -450);
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`会場間口 W: ${(window.room.w / 1000).toFixed(2)}m (${window.room.w}mm)`, window.room.w / 2, -350);
 
-    // 奥行(左側寸法)
+    // 奥行 D (左側寸法)
     ctx.beginPath();
     ctx.moveTo(-300, 0); ctx.lineTo(-300, window.room.d);
     ctx.moveTo(-450, 0); ctx.lineTo(-150, 0);
     ctx.moveTo(-450, window.room.d); ctx.lineTo(-150, window.room.d);
     ctx.stroke();
     ctx.save();
-    ctx.translate(-450, window.room.d / 2);
+    ctx.translate(-350, window.room.d / 2);
     ctx.rotate(-Math.PI / 2);
-    ctx.fillText(`奥行 D: ${(window.room.d / 1000).toFixed(2)}m`, 0, 0);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`会場奥行 D: ${(window.room.d / 1000).toFixed(2)}m (${window.room.d}mm)`, 0, 0);
     ctx.restore();
 
-    // 5. 扉の描画
+    // 5. 扉・搬入口の描画
     window.doors.forEach(d => {
       const tf = getDoorTransform(d);
       const isSel = (d.id === window.selectedDoorId);
@@ -553,7 +578,7 @@
       ctx.lineWidth = isSel ? 45 : 30;
 
       if (d.type === 'closed') {
-        // 閉鎖扉 (赤色枠線＋×印)
+        // 閉鎖 (赤線枠＋×印)
         ctx.strokeStyle = '#ef4444';
         ctx.fillStyle = '#fee2e2';
         ctx.fillRect(-w / 2, -40, w, 80);
@@ -563,7 +588,7 @@
         ctx.moveTo(-w / 2, 40); ctx.lineTo(w / 2, -40);
         ctx.stroke();
       } else if (d.type === 'double') {
-        // 2枚 (両開き)
+        // 2枚 (両開き円弧)
         ctx.strokeStyle = isSel ? '#2563eb' : '#0284c7';
         const halfW = w / 2;
         ctx.strokeRect(-halfW, -25, w, 50);
@@ -590,7 +615,8 @@
       ctx.fillStyle = isSel ? '#1d4ed8' : '#0f172a';
       ctx.font = 'bold 120px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(d.name, 0, 160);
+      ctx.textBaseline = 'top';
+      ctx.fillText(d.name, 0, 70);
 
       ctx.restore();
     });
@@ -601,44 +627,65 @@
   function drawRoomSide(ctx, sliceX) {
     ctx.save();
 
-    // 1. 床面ライン (FL±0)
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 20;
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(window.room.d, 0);
-    ctx.stroke();
+    const ceilingH = window.room.h || 5000;
+    const roomD = window.room.d || 24000;
 
-    // 2. 天井ライン (CH)
-    const ch = window.room.ceilingH || 5000;
-    ctx.strokeStyle = '#94a3b8';
-    ctx.lineWidth = 15;
-    ctx.setLineDash([40, 20]);
-    ctx.beginPath();
-    ctx.moveTo(0, -ch);
-    ctx.lineTo(window.room.d, -ch);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // 天井高さラベル
-    ctx.fillStyle = '#64748b';
-    ctx.font = 'bold 110px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(`CH: ${(ch / 1000).toFixed(1)}m`, 100, -ch + 150);
-
-    // 3. 最奥・手前の外壁ライン
+    // 1. 床面基準線 (FL±0: Z=0)
     ctx.strokeStyle = '#0f172a';
     ctx.lineWidth = 25;
     ctx.beginPath();
-    ctx.moveTo(0, 0); ctx.lineTo(0, -ch);
-    ctx.moveTo(window.room.d, 0); ctx.lineTo(window.room.d, -ch);
+    ctx.moveTo(0, 0);
+    ctx.lineTo(roomD, 0);
     ctx.stroke();
+
+    // 2. 天井基準線 (Z = -ceilingH)
+    ctx.strokeStyle = '#64748b';
+    ctx.lineWidth = 18;
+    ctx.setLineDash([60, 30]);
+    ctx.beginPath();
+    ctx.moveTo(0, -ceilingH);
+    ctx.lineTo(roomD, -ceilingH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 3. 奥壁断面 (Y=0) & 手前壁断面 (Y=roomD)
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 30;
+    ctx.beginPath();
+    // 奥壁 (ステージ背後側)
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, -ceilingH);
+    // 手前壁 (後方客席・搬入口側)
+    ctx.moveTo(roomD, 0);
+    ctx.lineTo(roomD, -ceilingH);
+    ctx.stroke();
+
+    // 4. 天井高さ CAD寸法線
+    ctx.strokeStyle = '#0284c7';
+    ctx.lineWidth = 15;
+    ctx.fillStyle = '#0284c7';
+    ctx.font = 'bold 120px sans-serif';
+
+    const dimY = -350; // Y=0 のさらに奥に寸法線
+    ctx.beginPath();
+    ctx.moveTo(dimY, 0); ctx.lineTo(dimY, -ceilingH);
+    ctx.moveTo(dimY - 100, 0); ctx.lineTo(dimY + 100, 0);
+    ctx.moveTo(dimY - 100, -ceilingH); ctx.lineTo(dimY + 100, -ceilingH);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.translate(dimY - 80, -ceilingH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`天井高 CH: ${(ceilingH / 1000).toFixed(2)}m (${ceilingH}mm)`, 0, 0);
+    ctx.restore();
 
     ctx.restore();
   }
 
   // ==========================================================================
-  // 7. マウスヒットテスト & ドラッグハンドラ
+  // 7. マウス操作判定 (hitTest & handleDrag)
   // ==========================================================================
   function hitTest(wx, wy) {
     // 1. 多角形頂点ハンドル (半径400mm以内)
@@ -657,7 +704,7 @@
       if (Math.hypot(tf.x - wx, tf.y - wy) < 600) {
         window.selectedDoorId = d.id;
         syncSelectedDoorToUI();
-        updateDoorUIList();
+        updateDoorSelectOptions();
         triggerRender();
         return { type: 'room_door', item: d };
       }
@@ -682,8 +729,59 @@
   }
 
   // ==========================================================================
-  // 8. ユーティリティ & 外部連携
+  // 8. データ入出力 (exportData / importData - Undo/Redo 連動)
   // ==========================================================================
+  function exportData() {
+    return {
+      room: JSON.parse(JSON.stringify(window.room)),
+      doors: JSON.parse(JSON.stringify(window.doors)),
+      selectedDoorId: window.selectedDoorId
+    };
+  }
+
+  function importData(data) {
+    if (!data) return;
+    if (data.room) {
+      window.room = JSON.parse(JSON.stringify(data.room));
+      if (typeof window.room.h !== 'number') {
+        window.room.h = window.room.ceilingH || 5000;
+      }
+      window.room.ceilingH = window.room.h;
+    }
+    if (Array.isArray(data.doors)) {
+      window.doors = JSON.parse(JSON.stringify(data.doors));
+    }
+    if (data.selectedDoorId) {
+      window.selectedDoorId = data.selectedDoorId;
+    }
+    syncUI();
+  }
+
+  function syncUI() {
+    const isPoly = (window.room.shapeType === 'polygon');
+    const shapeSel = document.getElementById('roomShapeType');
+    if (shapeSel) shapeSel.value = window.room.shapeType;
+
+    const rowRect = document.getElementById('roomBasicDimsRow');
+    const grpPoly = document.getElementById('polygonConfigGroup');
+    if (rowRect) rowRect.style.display = isPoly ? 'none' : 'grid';
+    if (grpPoly) grpPoly.style.display = isPoly ? 'block' : 'none';
+
+    const rw = document.getElementById('roomW');
+    const rd = document.getElementById('roomD');
+    const rh = document.getElementById('roomH');
+    const rhp = document.getElementById('roomHPoly');
+    if (rw) rw.value = Math.round(window.room.w);
+    if (rd) rd.value = Math.round(window.room.d);
+    if (rh) rh.value = Math.round(window.room.h);
+    if (rhp) rhp.value = Math.round(window.room.h);
+
+    updateDoorWallSelectOptions();
+    updateDoorSelectOptions();
+    syncSelectedDoorToUI();
+    updateHUDStats();
+  }
+
   function triggerRender() {
     if (typeof window.requestRender === 'function') {
       window.requestRender();
@@ -706,15 +804,12 @@
     drawSide: drawRoomSide,
     hitTest: hitTest,
     handleDrag: handleDrag,
+    exportData: exportData,
+    importData: importData,
     recalculate: recalculateRoomBounds,
-    syncUI: function () {
-      updateDoorWallSelectOptions();
-      updateDoorUIList();
-      syncSelectedDoorToUI();
-    }
+    syncUI: syncUI
   };
 
-  // DOMロード時にUI注入
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', injectRoomUI);
   } else {

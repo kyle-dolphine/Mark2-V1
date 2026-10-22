@@ -4,11 +4,12 @@
  * 【タブ4】登壇者モジュール (tab4_guests.js)
  * 
  * 担当機能:
- * 1. 登壇者リストの管理（追加・削除・選択・0名対応）
+ * 1. 登壇者リストの管理（追加・削除・選択・スタイル切替／最低0名対応）
  * 2. 平面図（Top View）での右向き描画
- * 3. 立面図（Side View）での【床0 (FL±0) 基準】右向き接地シルエット描画
- * 4. キャンバス上でのクリック選択・ドラッグ移動中継 (hitTest / handleDrag)
- * 5. Undo/Redo (exportData / importData) ＆ 操作パレットUI自動注入
+ * 3. 立面図（Side View）での統一描画（横軸=Y, 縦軸=-baseZ, スライス連動＆透過全把握）
+ * 4. core_engine.js との直接連動（hookEngineRender完全廃止）
+ * 5. キャンバス上でのクリック選択・ドラッグ移動中継（消滅バグ防止・数値即時同期）
+ * 6. Undo/Redo (exportData / importData) ＆ 操作パレットUI自動注入
  * ==============================================================================
  */
 
@@ -16,10 +17,10 @@
   'use strict';
 
   const tabGuestsModule = {
-    // 登壇者データリスト（baseLevel: 'floor' で床0からスタート）
+    // 登壇者データリスト
     list: [
-      { id: 'G1', name: '登壇者 1', type: 'high_chair', h: 750, baseLevel: 'floor', x: 6000, y: 2200 },
-      { id: 'G2', name: '登壇者 2', type: 'high_chair', h: 750, baseLevel: 'floor', x: 8000, y: 2200 }
+      { id: 'G1', name: '登壇者 1', type: 'high_chair', h: 750, x: 6000, y: 2200 },
+      { id: 'G2', name: '登壇者 2', type: 'high_chair', h: 750, x: 8000, y: 2200 }
     ],
     selectedId: 'G1',
     seatedTorsoH: 850, // 標準的な座高 (mm)
@@ -43,13 +44,13 @@
       const num = this.list.length + 1;
       const stage = window.stage || { x: 2000, y: 1200, w: 10000, d: 3000, h: 800 };
       
+      // ステージ中央付近に左右交互に並べて配置
       const offsetX = (num % 2 === 0 ? 1 : -1) * (Math.floor(num / 2) * 900);
       const newGuest = {
         id: 'G' + Date.now(),
         name: `登壇者 ${num}`,
         type: 'high_chair',
         h: 750,
-        baseLevel: 'floor', // 基本は床0スタート
         x: Math.round(stage.x + stage.w / 2 + offsetX),
         y: Math.round(stage.y + stage.d / 2)
       };
@@ -59,7 +60,6 @@
       this.updateUI();
       
       if (typeof window.requestRender === 'function') window.requestRender();
-      else if (typeof window.render === 'function') window.render();
     },
 
     // 登壇者の削除（0人まで削除可能）
@@ -72,7 +72,6 @@
       this.updateUI();
       
       if (typeof window.requestRender === 'function') window.requestRender();
-      else if (typeof window.render === 'function') window.render();
     },
 
     // 選択中プロパティの更新
@@ -85,19 +84,20 @@
       if (g) {
         Object.assign(g, props);
         if (typeof window.requestRender === 'function') window.requestRender();
-        else if (typeof window.render === 'function') window.render();
       }
     },
 
-    // 基準高さ（Z=0 床面 または ステージ天板）の取得
-    getGuestBaseZ: function (g) {
-      // 基本は床0 (0mm) からスタート
-      if (!g.baseLevel || g.baseLevel === 'floor') {
-        return 0;
+    // ステージ内外判定による足元高（baseZ）の取得
+    getBaseZ: function (g) {
+      const stage = window.stage || { x: 2000, y: 1200, w: 10000, d: 3000, h: 800 };
+      let isInside = false;
+      if (typeof window.isInsideStage === 'function') {
+        isInside = window.isInsideStage(g.x, g.y);
+      } else {
+        isInside = (g.x >= stage.x && g.x <= stage.x + stage.w &&
+                    g.y >= stage.y && g.y <= stage.y + stage.d);
       }
-      // 'stage' 指定の場合のみステージ高を加算
-      const stage = window.stage || { h: 800 };
-      return stage.h || 0;
+      return isInside ? (stage.h || 800) : 0;
     },
 
     // ==========================================================================
@@ -123,7 +123,7 @@
         ctx.lineWidth = isSel ? 35 : 20;
         ctx.stroke();
 
-        // 2. 頭部（やや右寄り）
+        // 2. 頭部（右寄り）
         ctx.beginPath();
         ctx.arc(g.x + 45, g.y, 85, 0, Math.PI * 2);
         ctx.fill();
@@ -138,43 +138,49 @@
 
         // 4. ラベル表示
         const typeBadge = g.type === 'high_chair' ? '[H]' : (g.type === 'low_chair' ? '[L]' : '[立]');
-        const lvlBadge = (g.baseLevel === 'stage') ? ' (台)' : '';
         ctx.fillStyle = isSel ? '#2563eb' : '#0f172a';
         ctx.font = 'bold 150px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
-        this.drawOutlinedText(ctx, `${g.name} ${typeBadge}${lvlBadge}`, g.x, g.y - 250);
+        this.drawOutlinedText(ctx, `${g.name} ${typeBadge}`, g.x, g.y - 250);
 
         ctx.restore();
       });
     },
 
-    // 【立面図】描画 (基本は床0スタート: posY = -baseZ)
-    drawSide: function (ctx) {
+    // 【立面図】描画 (横軸=Y, 縦軸=-baseZ, 右向きシルエット)
+    drawSide: function (ctx, sliceX) {
       if (this.list.length === 0) return;
 
       this.list.forEach(g => {
         const isSel = (g.id === this.selectedId);
-        const baseZ = this.getGuestBaseZ(g); // 基本は 0
+        const baseZ = this.getBaseZ(g);
 
         const posX = g.y;       // 立面図の横軸は Y (会場奥行き)
-        const posY = -baseZ;     // 床0基準 (床面は Y=0)
+        const posY = -baseZ;     // 縦軸は -baseZ (ステージ上または床面0)
+
+        // スライス位置との距離計算（消滅を防ぎ、離れている場合は半透明で全体把握）
+        const hasSlice = (typeof sliceX === 'number' && !isNaN(sliceX));
+        const distFromSlice = hasSlice ? Math.abs(sliceX - g.x) : 0;
+        const isNearSlice = !hasSlice || (distFromSlice <= 600);
 
         ctx.save();
+        // 選択中は完全不透明、スライス近傍は濃く、離れている場合は半透明(0.3)で常時表示
+        ctx.globalAlpha = isSel ? 1.0 : (isNearSlice ? 0.95 : 0.3);
         ctx.strokeStyle = isSel ? '#2563eb' : '#0f172a';
         ctx.fillStyle = isSel ? '#2563eb' : '#0f172a';
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
 
         if (g.type === 'standing') {
-          // 立ち姿（足元が床0に接地）
+          // 立ち姿（足元が baseZ に接地）
           this.drawPersonRight(ctx, posX, posY, g.h, false);
         } else if (g.type === 'high_chair') {
-          // ハイチェア（脚が床0に接地）
+          // ハイチェア（脚が baseZ に接地）
           this.drawHighChairRight(ctx, posX, posY, g.h);
           this.drawPersonRight(ctx, posX, posY - g.h, this.seatedTorsoH, true, g.h);
         } else {
-          // ローチェア（脚が床0に接地）
+          // ローチェア（脚が baseZ に接地）
           this.drawLowChairRight(ctx, posX, posY, g.h);
           this.drawPersonRight(ctx, posX, posY - g.h, this.seatedTorsoH, true, g.h);
         }
@@ -184,18 +190,18 @@
         ctx.font = 'bold 180px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
-        const zInfo = (baseZ > 0) ? ` (台+${baseZ})` : '';
-        this.drawOutlinedText(ctx, `${g.name} (H:${g.h}${zInfo})`, posX, posY - g.h - (g.type === 'standing' ? 200 : 950));
+        const zLabel = baseZ > 0 ? ` (台+${baseZ})` : '';
+        this.drawOutlinedText(ctx, `${g.name} (H:${g.h}${zLabel})`, posX, posY - g.h - 950);
 
         ctx.restore();
       });
     },
 
-    // 🪑 ハイチェア（右向きシルエット・床 y から座面 y - h まで）
+    // 🪑 ハイチェア（右向きシルエット）
     drawHighChairRight: function (ctx, x, y, h) {
       ctx.lineWidth = 18;
       ctx.beginPath();
-      // 後脚（左）・前脚（右）: 床 y からまっすぐ接地
+      // 後脚（左）・前脚（右）: y から座面 y - h まで接地
       ctx.moveTo(x - 90, y); ctx.lineTo(x - 40, y - h);
       ctx.moveTo(x + 90, y); ctx.lineTo(x + 40, y - h);
       // 座面
@@ -207,13 +213,13 @@
       ctx.stroke();
     },
 
-    // 💺 ローチェア（右向きシルエット・床 y から座面 y - h まで）
+    // 💺 ローチェア（右向きシルエット）
     drawLowChairRight: function (ctx, x, y, h) {
       ctx.lineWidth = 18;
       ctx.beginPath();
       // 座面クッション
       ctx.strokeRect(x - 160, y - h, 320, 40);
-      // 後脚・前脚: 床 y にしっかり接地
+      // 後脚・前脚: y に接地
       ctx.moveTo(x - 120, y - h); ctx.lineTo(x - 120, y);
       ctx.moveTo(x + 120, y - h); ctx.lineTo(x + 120, y);
       // 背もたれ（左側=後ろ）
@@ -226,42 +232,37 @@
       ctx.lineWidth = 26;
 
       if (isSeated) {
-        // 座り姿勢 (y は座面高さ)
-        // 1. 胴体
+        // 座り姿勢 (y: 座面高さ)
         ctx.beginPath();
         ctx.moveTo(x - 40, y); 
-        ctx.lineTo(x - 40, y - h + 180);
-        // 2. 太もも (右方向へ)
+        ctx.lineTo(x - 40, y - h + 180); // 胴体
         ctx.moveTo(x - 40, y - 50);
-        ctx.lineTo(x + 150, y - 50);
-        
-        // 3. すね (ローチェアなら床へ、ハイチェアなら足置きステップへ接地)
+        ctx.lineTo(x + 150, y - 50);     // 太もも（右へ）
+
+        // すね（ハイチェアなら足置きステップ、ローチェアなら床へ）
         const footDrop = (chairH > 500) ? (chairH * 0.55) : chairH;
         ctx.lineTo(x + 150, y + footDrop);
-        // 足先（右向きの靴）
-        ctx.lineTo(x + 210, y + footDrop);
+        ctx.lineTo(x + 210, y + footDrop); // つま先
         ctx.stroke();
 
-        // 4. 頭部（右向き前傾）
+        // 頭部（右向き前傾）
         ctx.beginPath();
         ctx.arc(x + 20, y - h + 90, 85, 0, Math.PI * 2);
         ctx.fill();
 
-        // 5. 鼻先（右向き）
+        // 鼻先（右向き）
         ctx.beginPath();
         ctx.moveTo(x + 95, y - h + 90);
         ctx.lineTo(x + 150, y - h + 90);
         ctx.lineTo(x + 110, y - h + 115);
         ctx.fill();
       } else {
-        // 直立姿勢 (y は床面)
+        // 直立姿勢 (y: 接地面)
         ctx.beginPath();
-        // 足元から胴体へ
         ctx.moveTo(x, y);
         ctx.lineTo(x, y - h + 180);
-        // 足先（靴）
         ctx.moveTo(x, y);
-        ctx.lineTo(x + 80, y);
+        ctx.lineTo(x + 80, y); // つま先
         ctx.stroke();
 
         // 腕
@@ -285,7 +286,7 @@
       }
     },
 
-    // 文字輪郭描画
+    // 文字輪郭描画（重なり防止）
     drawOutlinedText: function (ctx, text, x, y) {
       ctx.save();
       ctx.strokeStyle = '#ffffff';
@@ -297,7 +298,7 @@
     },
 
     // ==========================================================================
-    // 3. マウス操作・当たり判定
+    // 3. マウス操作・当たり判定 (core_engine.js 中継)
     // ==========================================================================
     hitTest: function (wx, wy) {
       if (this.list.length === 0) return null;
@@ -310,7 +311,7 @@
         if (viewMode === 'top') {
           // 平面図：中心からの距離判定
           const dist = Math.hypot(g.x - wx, g.y - wy);
-          if (dist <= 300) {
+          if (dist <= 350) {
             this.selectedId = g.id;
             this.updateUI();
             if (typeof window.switchTab === 'function') window.switchTab('guests');
@@ -322,11 +323,11 @@
             };
           }
         } else {
-          // 立面図：床0基準 (posY = -baseZ)
-          const baseZ = this.getGuestBaseZ(g);
-          const topZ = baseZ + g.h + (g.type === 'standing' ? 100 : this.seatedTorsoH);
+          // 立面図：横軸=g.y, 縦軸=-baseZ
+          const baseZ = this.getBaseZ(g);
+          const topZ = baseZ + g.h + (g.type === 'standing' ? 200 : this.seatedTorsoH);
           
-          if (Math.abs(wx - g.y) <= 300 && wy <= -baseZ + 100 && wy >= -topZ - 200) {
+          if (Math.abs(wx - g.y) <= 350 && wy <= -baseZ + 100 && wy >= -topZ - 200) {
             this.selectedId = g.id;
             this.updateUI();
             if (typeof window.switchTab === 'function') window.switchTab('guests');
@@ -342,14 +343,21 @@
     },
 
     handleDrag: function (target, wx, wy) {
+      if (!target || !target.item) return;
+
       if (target.type === 'guest') {
-        // 平面図ドラッグ
-        target.item.x = Math.round(wx - target.offsetX);
-        target.item.y = Math.round(wy - target.offsetY);
+        // 平面図ドラッグ：X, Yを移動
+        const nx = Math.round(wx - (target.offsetX || 0));
+        const ny = Math.round(wy - (target.offsetY || 0));
+        if (!isNaN(nx)) target.item.x = nx;
+        if (!isNaN(ny)) target.item.y = ny;
       } else if (target.type === 'guest_side') {
-        // 立面図ドラッグ：Y (奥行き) を移動
-        target.item.y = Math.round(wx - target.offsetX);
+        // 立面図ドラッグ：Y (奥行き) のみ移動
+        const ny = Math.round(wx - (target.offsetX || 0));
+        if (!isNaN(ny)) target.item.y = ny;
       }
+
+      // 操作パネルの数値（X, Y）と即時同期
       this.syncInputs();
     },
 
@@ -390,34 +398,22 @@
               </select>
             </div>
           </div>
-          
-          <div class="input-row" style="margin-bottom:6px;">
-            <div class="input-box">
-              <label>設置基準面</label>
-              <select id="guest-base-level">
-                <option value="floor">🟩 床面 0 (FL±0 スタート)</option>
-                <option value="stage">🏛️ ステージ天板上</option>
-              </select>
-            </div>
+          <div class="input-row">
             <div class="input-box">
               <label>座面/身長 H (mm)</label>
               <input type="number" id="guest-h" value="750" step="50">
             </div>
-          </div>
-
-          <div class="input-row">
             <div class="input-box">
               <label>配置 X (幅 mm)</label>
               <input type="number" id="guest-x" value="6000" step="100">
             </div>
+          </div>
+          <div class="input-row" style="margin-top:6px;">
             <div class="input-box">
               <label>配置 Y (奥行 mm)</label>
               <input type="number" id="guest-y" value="2200" step="100">
             </div>
-          </div>
-
-          <div class="input-row" style="margin-top:6px;">
-            <div class="input-box" style="width:100%;">
+            <div class="input-box" style="justify-content:flex-end;">
               <button class="btn-action" id="btn-guest-center" style="width:100%; font-size:10px; height:28px;">🎯 舞台中央へ配置</button>
             </div>
           </div>
@@ -432,7 +428,6 @@
         this.selectedId = e.target.value;
         this.syncInputs();
         if (typeof window.requestRender === 'function') window.requestRender();
-        else if (typeof window.render === 'function') window.render();
       };
 
       document.getElementById('guest-name').oninput = (e) => {
@@ -449,10 +444,6 @@
         
         document.getElementById('guest-h').value = defaultH;
         this.updateSelected({ type: type, h: defaultH }, true);
-      };
-
-      document.getElementById('guest-base-level').onchange = (e) => {
-        this.updateSelected({ baseLevel: e.target.value }, true);
       };
 
       document.getElementById('guest-h').onchange = (e) => {
@@ -484,7 +475,6 @@
       const centerBtn = document.getElementById('btn-guest-center');
       const nameEl = document.getElementById('guest-name');
       const typeEl = document.getElementById('guest-type');
-      const baseEl = document.getElementById('guest-base-level');
       const hEl = document.getElementById('guest-h');
       const xEl = document.getElementById('guest-x');
       const yEl = document.getElementById('guest-y');
@@ -493,7 +483,7 @@
 
       select.innerHTML = '';
 
-      // 0名時のフォーム保護
+      // 0名時のUI非活性化
       if (this.list.length === 0) {
         const opt = document.createElement('option');
         opt.value = '';
@@ -505,20 +495,18 @@
         if (centerBtn) centerBtn.disabled = true;
         if (nameEl) { nameEl.value = ''; nameEl.disabled = true; }
         if (typeEl) { typeEl.disabled = true; }
-        if (baseEl) { baseEl.disabled = true; }
         if (hEl) { hEl.value = ''; hEl.disabled = true; }
         if (xEl) { xEl.value = ''; xEl.disabled = true; }
         if (yEl) { yEl.value = ''; yEl.disabled = true; }
         return;
       }
 
-      // 1人以上いる場合は活性化
+      // 1名以上いる場合は活性化
       select.disabled = false;
       if (delBtn) delBtn.disabled = false;
       if (centerBtn) centerBtn.disabled = false;
       if (nameEl) nameEl.disabled = false;
       if (typeEl) typeEl.disabled = false;
-      if (baseEl) baseEl.disabled = false;
       if (hEl) hEl.disabled = false;
       if (xEl) xEl.disabled = false;
       if (yEl) yEl.disabled = false;
@@ -545,17 +533,15 @@
 
       const nameEl = document.getElementById('guest-name');
       const typeEl = document.getElementById('guest-type');
-      const baseEl = document.getElementById('guest-base-level');
       const hEl = document.getElementById('guest-h');
       const xEl = document.getElementById('guest-x');
       const yEl = document.getElementById('guest-y');
 
-      if (nameEl) nameEl.value = sel.name;
+      if (nameEl && document.activeElement !== nameEl) nameEl.value = sel.name;
       if (typeEl) typeEl.value = sel.type;
-      if (baseEl) baseEl.value = sel.baseLevel || 'floor';
-      if (hEl) hEl.value = sel.h;
-      if (xEl) xEl.value = Math.round(sel.x);
-      if (yEl) yEl.value = Math.round(sel.y);
+      if (hEl && document.activeElement !== hEl) hEl.value = sel.h;
+      if (xEl && document.activeElement !== xEl) xEl.value = Math.round(sel.x);
+      if (yEl && document.activeElement !== yEl) yEl.value = Math.round(sel.y);
     },
 
     // ==========================================================================
@@ -587,7 +573,6 @@
       }
       this.updateUI();
       if (typeof window.requestRender === 'function') window.requestRender();
-      else if (typeof window.render === 'function') window.render();
     }
   };
 

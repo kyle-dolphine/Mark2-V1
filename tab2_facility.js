@@ -4,9 +4,13 @@
  * モジュール：【ノート2：会場設備】 tab2_facility.js
  * 
  * 担当機能：
- *  - ステージ（ロック機能、中央配置）
+ *  - ステージ（W/D/H、位置X/Y、ロック機能、中央配置）
  *  - バックパネル（複数管理、ステージ連動/自由配置ドラッグ）
  *  - スクリーン（複数管理、インチ指定、下端床高、ドラッグ・角度調整）
+ *  - 平面図描画
+ *  - 立面図描画（横軸=Y、縦軸=-Z の統一座標系によるスライス断面描画）
+ *  - hitTest / handleDrag によるマウス操作
+ *  - exportData / importData による Undo / Redo 完全連動
  * ============================================================================
  */
 
@@ -14,21 +18,21 @@
   'use strict';
 
   // ==========================================================================
-  // 1. データモデル初期化 (共通グローバル空間への登録)
+  // 1. 単一データ源（Single Source of Truth）初期化
   // ==========================================================================
   window.stage = window.stage || { x: 2000, y: 1200, w: 10000, d: 3000, h: 800 };
-  window.isStageLocked = window.isStageLocked !== undefined ? window.isStageLocked : true;
+  if (typeof window.isStageLocked === 'undefined') window.isStageLocked = true;
 
   window.panels = window.panels || [
     { id: 'BP1', name: 'メインパネル', enabled: true, w: 8000, d: 100, h: 2400, posType: 'on_stage', customPos: false, x: 3000, y: 1200 }
   ];
-  window.selectedPanelId = window.selectedPanelId || 'BP1';
+  window.selectedPanelId = window.selectedPanelId || (window.panels[0] ? window.panels[0].id : 'BP1');
 
   window.screens = window.screens || [
     { id: 'SCR1', name: 'スクリーン下手', w: 3320, h: 1870, bottomZ: 1200, x: 2500, y: 2200, angle: 10 },
     { id: 'SCR2', name: 'スクリーン上手', w: 3320, h: 1870, bottomZ: 1200, x: 11500, y: 2200, angle: -10 }
   ];
-  window.selectedScreenId = window.selectedScreenId || 'SCR1';
+  window.selectedScreenId = window.selectedScreenId || (window.screens[0] ? window.screens[0].id : 'SCR1');
 
   // ==========================================================================
   // 2. UIテンプレート自動生成 (#panel-facility へのインジェクション)
@@ -52,7 +56,7 @@
           <div class="input-box"><label>高さ (H mm)</label><input type="number" id="stageH" value="${window.stage.h}" step="50"></div>
         </div>
         <div class="ui-row">
-          <div class="input-box"><label>配置X</label><input type="number" id="stageX" value="${window.stage.x}" step="100" ${window.isStageLocked ? 'disabled' : ''}></div>
+          <div class="input-box"><label>配置X (mm)</label><input type="number" id="stageX" value="${window.stage.x}" step="100" ${window.isStageLocked ? 'disabled' : ''}></div>
           <div class="input-box"><label>配置Y (奥から)</label><input type="number" id="stageY" value="${window.stage.y}" step="100" ${window.isStageLocked ? 'disabled' : ''}></div>
         </div>
         <div class="ui-row full" style="margin-top:4px;">
@@ -60,10 +64,10 @@
         </div>
       </div>
 
-      <!-- 🖼️ バックパネル -->
+      <!-- 🖼️ バックパネル (複数設置・自由ドラッグ移動対応) -->
       <div class="ui-group">
         <div class="ui-group-title" style="display:flex; justify-content:space-between; align-items:center;">
-          <span>🖼️ バックパネル (複数・自由配置)</span>
+          <span>🖼️ バックパネル (複数管理・移動可)</span>
           <div style="display:flex; gap:4px;">
             <button class="btn-action" id="btnAddPanel" style="padding:2px 6px; font-size:10px;">＋ 追加</button>
             <button class="btn-action btn-danger" id="btnDelPanel" style="padding:2px 6px; font-size:10px;">削除</button>
@@ -71,7 +75,7 @@
         </div>
         <div class="ui-row full">
           <div class="input-box">
-            <label>選択パネル</label>
+            <label>選択中パネル</label>
             <select id="panelSelect"></select>
           </div>
         </div>
@@ -95,25 +99,27 @@
             </label>
           </div>
         </div>
+        <!-- ステージ連動時の設定 -->
         <div class="ui-row" id="panelAutoPosBox">
           <div class="input-box" style="grid-column: 1 / -1;">
-            <label>ステージ連動 基準位置</label>
+            <label>ステージ基準位置</label>
             <select id="panelPosType">
               <option value="on_stage">天板奥 (ステージ上奥端)</option>
               <option value="behind_stage">床置き (ステージ背後床面)</option>
             </select>
           </div>
         </div>
+        <!-- 自由配置時の座標設定 -->
         <div class="ui-row" id="panelCustomCoordBox" style="display:none;">
-          <div class="input-box"><label>配置 X (mm)</label><input type="number" id="panelX" step="100"></div>
-          <div class="input-box"><label>配置 Y (mm)</label><input type="number" id="panelY" step="100"></div>
+          <div class="input-box"><label>配置 X</label><input type="number" id="panelX" step="100"></div>
+          <div class="input-box"><label>配置 Y</label><input type="number" id="panelY" step="100"></div>
         </div>
       </div>
 
-      <!-- 📽️ スクリーン -->
+      <!-- 📽️ スクリーン (直接ドラッグ移動可) -->
       <div class="ui-group">
         <div class="ui-group-title" style="display:flex; justify-content:space-between; align-items:center;">
-          <span>📽️ スクリーン</span>
+          <span>📽️ スクリーン (ドラッグ移動可)</span>
           <div style="display:flex; gap:4px;">
             <button class="btn-action" id="btnAddScreen" style="padding:2px 6px; font-size:10px;">＋ 追加</button>
             <button class="btn-action btn-danger" id="btnDelScreen" style="padding:2px 6px; font-size:10px;">削除</button>
@@ -121,7 +127,7 @@
         </div>
         <div class="ui-row full">
           <div class="input-box">
-            <label>選択スクリーン</label>
+            <label>選択中スクリーン</label>
             <select id="screenSelect"></select>
           </div>
         </div>
@@ -153,8 +159,7 @@
     `;
 
     bindFacilityEvents();
-    updatePanelUIList();
-    updateScreenUIList();
+    syncUI();
   }
 
   // ==========================================================================
@@ -169,8 +174,10 @@
       window.stage.h = parseFloat(document.getElementById('stageH').value) || 800;
       window.stage.x = parseFloat(document.getElementById('stageX').value) || 0;
       window.stage.y = parseFloat(document.getElementById('stageY').value) || 0;
+      updateHUDStats();
       triggerRender();
     };
+
     document.getElementById('stageW').addEventListener('change', onStageChange);
     document.getElementById('stageD').addEventListener('change', onStageChange);
     document.getElementById('stageH').addEventListener('change', onStageChange);
@@ -178,6 +185,7 @@
     document.getElementById('stageY').addEventListener('change', onStageChange);
 
     document.getElementById('stageLockCheck').addEventListener('change', function(e) {
+      pushUndo();
       window.isStageLocked = e.target.checked;
       document.getElementById('stageX').disabled = window.isStageLocked;
       document.getElementById('stageY').disabled = window.isStageLocked;
@@ -185,15 +193,16 @@
     });
 
     document.getElementById('btnCenterStage').addEventListener('click', function() {
-      pushUndo();
       if (window.room && window.room.w) {
+        pushUndo();
         window.stage.x = Math.round((window.room.w - window.stage.w) / 2);
         document.getElementById('stageX').value = window.stage.x;
+        updateHUDStats();
         triggerRender();
       }
     });
 
-    // --- パネル ---
+    // --- バックパネル ---
     document.getElementById('btnAddPanel').addEventListener('click', function() {
       pushUndo();
       const num = window.panels.length + 1;
@@ -203,22 +212,22 @@
         customPos: true, x: window.stage.x + (window.stage.w / 2) - 2500, y: window.stage.y + 100
       });
       window.selectedPanelId = newId;
-      updatePanelUIList();
+      syncUI();
       triggerRender();
     });
     
     document.getElementById('btnDelPanel').addEventListener('click', function() {
-      if (window.panels.length <= 1) return alert('これ以上削除できません。表示チェックを外してください。');
+      if (window.panels.length <= 1) return alert('これ以上削除できません。非表示にしてください。');
       pushUndo();
       window.panels = window.panels.filter(p => p.id !== window.selectedPanelId);
       window.selectedPanelId = window.panels[0].id;
-      updatePanelUIList();
+      syncUI();
       triggerRender();
     });
 
     document.getElementById('panelSelect').addEventListener('change', function(e) {
       window.selectedPanelId = e.target.value;
-      syncPanelUI();
+      syncSelectedPanelToUI();
       triggerRender();
     });
 
@@ -237,7 +246,8 @@
         p.x = parseFloat(document.getElementById('panelX').value) || 0;
         p.y = parseFloat(document.getElementById('panelY').value) || 0;
       }
-      syncPanelUI();
+      updatePanelSelectOptions();
+      syncSelectedPanelToUI();
       triggerRender();
     };
 
@@ -254,7 +264,7 @@
         x: window.stage.x + 1000 + (num * 100), y: window.stage.y + 1500, angle: 0
       });
       window.selectedScreenId = newId;
-      updateScreenUIList();
+      syncUI();
       triggerRender();
     });
 
@@ -263,13 +273,13 @@
       pushUndo();
       window.screens = window.screens.filter(s => s.id !== window.selectedScreenId);
       window.selectedScreenId = window.screens[0].id;
-      updateScreenUIList();
+      syncUI();
       triggerRender();
     });
 
     document.getElementById('screenSelect').addEventListener('change', function(e) {
       window.selectedScreenId = e.target.value;
-      syncScreenUI();
+      syncSelectedScreenToUI();
       triggerRender();
     });
 
@@ -283,7 +293,8 @@
       else if (preset === '150') { s.w = 3320; s.h = 1870; }
       else if (preset === '200') { s.w = 4428; s.h = 2490; }
       else if (preset === '250') { s.w = 5535; s.h = 3113; }
-      syncScreenUI();
+      updateScreenSelectOptions();
+      syncSelectedScreenToUI();
       triggerRender();
     });
 
@@ -299,7 +310,7 @@
       s.y = parseFloat(document.getElementById('screenY').value) || 0;
       s.angle = parseFloat(document.getElementById('screenAngle').value) || 0;
       document.getElementById('screenPreset').value = 'custom';
-      updateScreenUIList(); // 名前が変わった時のため
+      updateScreenSelectOptions();
       triggerRender();
     };
 
@@ -310,7 +321,7 @@
   // ==========================================================================
   // 4. データ・UI 同期処理
   // ==========================================================================
-  function updatePanelUIList() {
+  function updatePanelSelectOptions() {
     const sel = document.getElementById('panelSelect');
     if (!sel) return;
     sel.innerHTML = '';
@@ -321,10 +332,9 @@
       sel.appendChild(opt);
     });
     sel.value = window.selectedPanelId;
-    syncPanelUI();
   }
 
-  function syncPanelUI() {
+  function syncSelectedPanelToUI() {
     const p = window.panels.find(item => item.id === window.selectedPanelId);
     if (!p) return;
     document.getElementById('panelName').value = p.name;
@@ -348,7 +358,7 @@
     return { x: px, y: py };
   }
 
-  function updateScreenUIList() {
+  function updateScreenSelectOptions() {
     const sel = document.getElementById('screenSelect');
     if (!sel) return;
     sel.innerHTML = '';
@@ -359,10 +369,9 @@
       sel.appendChild(opt);
     });
     sel.value = window.selectedScreenId;
-    syncScreenUI();
   }
 
-  function syncScreenUI() {
+  function syncSelectedScreenToUI() {
     const s = window.screens.find(item => item.id === window.selectedScreenId);
     if (!s) return;
     document.getElementById('screenName').value = s.name;
@@ -374,17 +383,44 @@
     document.getElementById('screenAngle').value = s.angle;
   }
 
+  function updateHUDStats() {
+    const statStage = document.getElementById('statStage');
+    if (statStage) {
+      statStage.innerText = `W:${(window.stage.w / 1000).toFixed(1)}m D:${(window.stage.d / 1000).toFixed(1)}m (H:${window.stage.h}mm)`;
+    }
+  }
+
+  function syncUI() {
+    document.getElementById('stageW').value = window.stage.w;
+    document.getElementById('stageD').value = window.stage.d;
+    document.getElementById('stageH').value = window.stage.h;
+    document.getElementById('stageX').value = window.stage.x;
+    document.getElementById('stageY').value = window.stage.y;
+    
+    const slc = document.getElementById('stageLockCheck');
+    if (slc) {
+      slc.checked = window.isStageLocked;
+      document.getElementById('stageX').disabled = window.isStageLocked;
+      document.getElementById('stageY').disabled = window.isStageLocked;
+    }
+
+    updatePanelSelectOptions();
+    syncSelectedPanelToUI();
+    updateScreenSelectOptions();
+    syncSelectedScreenToUI();
+    updateHUDStats();
+  }
+
   // ==========================================================================
-  // 5. 描画エンジン連動 (平面図 Top / 立面図 Side)
+  // 5. 描画連動: drawTop(ctx) & drawSide(ctx, sliceX)
   // ==========================================================================
   function drawFacilityTop(ctx) {
-    // 1. ステージ
+    // 1. ステージ平面描画
     ctx.save();
     if (window.isStageLocked) {
       ctx.strokeStyle = '#020617';
       ctx.lineWidth = 40;
     } else {
-      // ロック解除時は青い点線にしてドラッグ可能をアピール
       ctx.strokeStyle = '#2563eb';
       ctx.lineWidth = 60;
       ctx.setLineDash([100, 50]);
@@ -393,9 +429,16 @@
     ctx.fillRect(window.stage.x, window.stage.y, window.stage.w, window.stage.d);
     ctx.strokeRect(window.stage.x, window.stage.y, window.stage.w, window.stage.d);
     ctx.setLineDash([]);
+    
+    // ステージ中央ラベル
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.08)';
+    ctx.font = '900 450px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('STAGE', window.stage.x + window.stage.w / 2, window.stage.y + window.stage.d / 2);
     ctx.restore();
 
-    // 2. パネル
+    // 2. パネル平面描画
     window.panels.forEach(p => {
       if (!p.enabled) return;
       const isSel = (p.id === window.selectedPanelId);
@@ -414,7 +457,7 @@
       ctx.restore();
     });
 
-    // 3. スクリーン
+    // 3. スクリーン平面描画
     window.screens.forEach(s => {
       ctx.save();
       ctx.translate(s.x, s.y);
@@ -438,19 +481,26 @@
   }
 
   function drawFacilitySide(ctx, sliceX) {
-    // 1. ステージ断面 (スライス座標がステージ幅内にある場合)
+    // 1. ステージ立面断面 (横軸=Y、縦軸=-Z)
+    // スライス座標(X)がステージ幅内にあれば描画
     if (sliceX >= window.stage.x && sliceX <= window.stage.x + window.stage.w) {
       ctx.save();
       ctx.fillStyle = '#ffffff';
       ctx.strokeStyle = '#020617';
       ctx.lineWidth = 30;
-      // 立面はY軸上がマイナス方向（空方向）なので -h とする
+      // Z=0基準で上に描くので高さは -window.stage.h
       ctx.fillRect(window.stage.y, 0, window.stage.d, -window.stage.h);
       ctx.strokeRect(window.stage.y, 0, window.stage.d, -window.stage.h);
+      
+      ctx.fillStyle = '#0f172a';
+      ctx.font = 'bold 120px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(`STAGE (H:${window.stage.h})`, window.stage.y + window.stage.d / 2, -window.stage.h / 2);
       ctx.restore();
     }
 
-    // 2. パネル断面
+    // 2. パネル立面断面
     window.panels.forEach(p => {
       if (!p.enabled) return;
       const pos = getPanelActualPos(p);
@@ -459,40 +509,53 @@
         ctx.fillStyle = '#e2e8f0';
         ctx.strokeStyle = '#475569';
         ctx.lineWidth = 20;
-        // パネルは床置きかステージ上かでベースのZが変わる
+        
+        // baseZ(底面高): ステージ上の場合はステージ高さ、床置きの場合は0
         const baseZ = (p.posType === 'behind_stage') ? 0 : window.stage.h;
         ctx.fillRect(pos.y, -baseZ, p.d, -p.h);
         ctx.strokeRect(pos.y, -baseZ, p.d, -p.h);
+        
+        ctx.fillStyle = '#1e293b';
+        ctx.font = 'bold 110px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${p.name} (H:${p.h})`, pos.y + p.d / 2, -baseZ - p.h - 60);
         ctx.restore();
       }
     });
 
-    // 3. スクリーン断面 (簡易判定: 角度を考慮せず中心Xからの幅で切断)
+    // 3. スクリーン立面断面
+    // 簡易判定: スクリーンの中心Xから幅W/2の範囲にスライスがあれば描画
     window.screens.forEach(s => {
       if (sliceX >= s.x - s.w / 2 && sliceX <= s.x + s.w / 2) {
         ctx.save();
         ctx.fillStyle = '#e0f2fe';
         ctx.strokeStyle = '#0284c7';
         ctx.lineWidth = 30;
-        // スクリーンの厚みは100として描画
+        
+        // スクリーンの厚みは100mmとしてY軸方向に描画
         ctx.fillRect(s.y - 50, -s.bottomZ, 100, -s.h);
         ctx.strokeRect(s.y - 50, -s.bottomZ, 100, -s.h);
+        
+        ctx.fillStyle = '#0284c7';
+        ctx.font = 'bold 120px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${s.name} (Z:${s.bottomZ})`, s.y, -s.bottomZ - s.h - 80);
         ctx.restore();
       }
     });
   }
 
   // ==========================================================================
-  // 6. マウスヒットテスト & ドラッグハンドラ
+  // 6. マウス操作判定 (hitTest & handleDrag)
   // ==========================================================================
   function hitTest(wx, wy) {
     // 1. スクリーン (優先)
     for (let s of window.screens) {
       if (Math.hypot(s.x - wx, s.y - wy) < s.w / 2) {
         window.selectedScreenId = s.id;
-        syncScreenUI();
+        syncSelectedScreenToUI();
+        updateScreenSelectOptions();
         triggerRender();
-        // ドラッグ用オフセットを記憶
         return { type: 'facility_screen', item: s, offsetX: s.x - wx, offsetY: s.y - wy };
       }
     }
@@ -501,10 +564,12 @@
     for (let p of window.panels) {
       if (!p.enabled) continue;
       const pos = getPanelActualPos(p);
+      // 掴みやすくするため当たり判定を広めに (±150)
       if (wx >= pos.x && wx <= pos.x + p.w && wy >= pos.y - 150 && wy <= pos.y + p.d + 150) {
         window.selectedPanelId = p.id;
-        p.customPos = true; // 掴んだ時点で自由配置モードへ移行
-        syncPanelUI();
+        p.customPos = true; // ドラッグされた時点で自由配置モードへ移行
+        syncSelectedPanelToUI();
+        updatePanelSelectOptions();
         triggerRender();
         return { type: 'facility_panel', item: p, offsetX: p.x - wx, offsetY: p.y - wy };
       }
@@ -525,13 +590,13 @@
     if (target.type === 'facility_screen') {
       target.item.x = Math.round(wx + target.offsetX);
       target.item.y = Math.round(wy + target.offsetY);
-      syncScreenUI();
+      syncSelectedScreenToUI();
       triggerRender();
       return true;
     } else if (target.type === 'facility_panel') {
       target.item.x = Math.round(wx + target.offsetX);
       target.item.y = Math.round(wy + target.offsetY);
-      syncPanelUI();
+      syncSelectedPanelToUI();
       triggerRender();
       return true;
     } else if (target.type === 'facility_stage') {
@@ -539,6 +604,7 @@
       window.stage.y = Math.round(wy + target.offsetY);
       document.getElementById('stageX').value = window.stage.x;
       document.getElementById('stageY').value = window.stage.y;
+      updateHUDStats();
       triggerRender();
       return true;
     }
@@ -546,8 +612,30 @@
   }
 
   // ==========================================================================
-  // 7. ユーティリティ & 外部連携
+  // 7. データ入出力 (exportData / importData - Undo/Redo 連動)
   // ==========================================================================
+  function exportData() {
+    return {
+      stage: JSON.parse(JSON.stringify(window.stage)),
+      isStageLocked: window.isStageLocked,
+      panels: JSON.parse(JSON.stringify(window.panels)),
+      selectedPanelId: window.selectedPanelId,
+      screens: JSON.parse(JSON.stringify(window.screens)),
+      selectedScreenId: window.selectedScreenId
+    };
+  }
+
+  function importData(data) {
+    if (!data) return;
+    if (data.stage) window.stage = JSON.parse(JSON.stringify(data.stage));
+    if (data.isStageLocked !== undefined) window.isStageLocked = data.isStageLocked;
+    if (data.panels) window.panels = JSON.parse(JSON.stringify(data.panels));
+    if (data.selectedPanelId) window.selectedPanelId = data.selectedPanelId;
+    if (data.screens) window.screens = JSON.parse(JSON.stringify(data.screens));
+    if (data.selectedScreenId) window.selectedScreenId = data.selectedScreenId;
+    syncUI();
+  }
+
   function triggerRender() {
     if (typeof window.requestRender === 'function') window.requestRender();
     else if (typeof window.render === 'function') window.render();
@@ -565,13 +653,11 @@
     drawSide: drawFacilitySide,
     hitTest: hitTest,
     handleDrag: handleDrag,
-    syncUI: function () {
-      updatePanelUIList();
-      updateScreenUIList();
-    }
+    exportData: exportData,
+    importData: importData,
+    syncUI: syncUI
   };
 
-  // DOMロード時にUI注入
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', injectFacilityUI);
   } else {
