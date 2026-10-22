@@ -4,11 +4,10 @@
  * 【基盤】コアエンジン (core_engine.js)
  * 
  * 修正内容:
- * 1. 【tab6_seats.js 連携対応】描画関数や座標変数を window オブジェクトに公開し、
- *    客席プラグインが正常にフック・描画できるようにアーキテクチャを修正
- * 2. 初期描画バグ解消（起動時の同期レンダリング保証）
- * 3. モジュール未読み込み時でも外郭・ステージ・寸法を自動描画するセーフティ
- * 4. パレット消失防止（body直下固定＆ドラッグ誤爆防止機構）
+ * 1. 【パレット消失完全根絶】PointerCapture API を採用し、ドラッグ終了時の遮断バグ・
+ *    ワープ・クリック誤爆を根本解消
+ * 2. 【全12ノート完全対応】客席(tab6_seats.js)を含む全モジュールの描画・操作フック維持
+ * 3. 【初期描画バグ解消】起動時の同期レンダリング保証（真っ白画面防止）
  * ==============================================================================
  */
 
@@ -37,7 +36,6 @@ window.core.getSystemSummary = function() {
       guestCnt = Array.isArray(gData) ? gData.length : (gData.list ? gData.list.length : 0);
     }
     
-    // 客席数の取得
     let seatCnt = window.seats ? window.seats.length : 0;
 
     let monCnt = 0;
@@ -81,18 +79,15 @@ let canvas = null;
 let ctx = null;
 let isRenderPending = false;
 
-// ★ 客席(tab6_seats.js) が必要とするグローバル変数を公開
 window.viewMode = 'top'; 
 let zoomLevel = 1.0; 
 const BASE_SCALE_TOP = 0.050; 
 const BASE_SCALE_SIDE = 0.085; 
 window.scale = BASE_SCALE_TOP * zoomLevel;
 
-// 客席描画用に panX, panY として公開
 window.panX = 100;
 window.panY = 100;
 
-// 客席操作用のグローバル変数
 window.seats = window.seats || [];
 window.selectedSeat = null;
 window.selectedItems = [];
@@ -131,7 +126,7 @@ function getCurrentStateSnapshot() {
   const state = {
     room: window.room, stage: window.stage, isStageLocked: window.isStageLocked,
     displaySettings: window.displaySettings, sideScrollOffset: window.sideScrollOffset,
-    seats: window.seats, // 客席データの保存
+    seats: window.seats,
     modules: {}
   };
   ALL_MODULE_KEYS.forEach(mKey => {
@@ -176,7 +171,7 @@ function applyStateSnapshot(data) {
     }
     syncCoreInputs();
     updateStats();
-    if(window.updateSeatCountBadge) window.updateSeatCountBadge();
+    if (window.updateSeatCountBadge) window.updateSeatCountBadge();
     window.updateCanvasSize();
     window.requestRender();
   } finally {
@@ -214,7 +209,6 @@ window.updateCanvasSize = function updateCanvasSize() {
   if (badge) badge.innerText = `${Math.round(zoomLevel * 100)}%`;
 };
 
-// ★客席モジュールがフックできるように window.render として公開
 window.render = function render() {
   if (!canvas) canvas = document.getElementById('simCanvas');
   if (!canvas) return;
@@ -380,7 +374,7 @@ function setupCanvasEvents() {
       wy -= window.SIDE_FLOOR_OFFSET_Y;
     }
 
-    // ★客席の操作判定 (tab6_seats.js が持つ window.seats を判定)
+    // 客席の操作判定 (tab6_seats.js が持つ window.seats を判定)
     if (window.viewMode === 'top' && window.seats) {
       if (window.seatTool === 'add') {
         window.saveHistory();
@@ -412,7 +406,6 @@ function setupCanvasEvents() {
         }
 
         if (window.seatTool === 'select' || window.seatTool === 'move') {
-          // すでに選択済みグループに入っているか
           const isGroupSelected = window.selectedItems.some(i => i.type === 'seat' && i.id === clickedSeat.id);
           
           if (!isGroupSelected) {
@@ -426,7 +419,6 @@ function setupCanvasEvents() {
 
           if (window.seatTool === 'move') {
             dragTarget = { type: 'seat_group', offsetX: wx, offsetY: wy };
-            // ドラッグ開始時の基準座標を保存
             window.selectedItems.forEach(item => {
               if (item.type === 'seat') {
                 const s = window.seats.find(st => st.id === item.id);
@@ -568,7 +560,6 @@ function setupKeyShortcuts() {
     if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) { e.preventDefault(); window.redo(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); openSaveModal(); return; }
     
-    // Deleteキーで選択中の客席を削除
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (window.selectedItems && window.selectedItems.length > 0) {
         window.saveHistory();
@@ -662,52 +653,99 @@ function toggleFov() {
   window.requestRender();
 }
 
+// ==============================================================================
+// 6. フローティングパレット制御（PointerCapture APIによる堅牢なドラッグ機構）
+// ==============================================================================
 function setupFloatingUI() {
   const floatUi = document.getElementById('floating-ui');
   const floatHeader = document.getElementById('floating-header');
   if (!floatUi || !floatHeader) return;
 
-  if (floatUi.parentElement !== document.body) document.body.appendChild(floatUi);
-  
-  const stopEvents = ['mousedown', 'mouseup', 'click', 'dblclick', 'wheel', 'touchstart', 'touchend'];
-  stopEvents.forEach(evt => {
+  // 1. 強制的に body 直下へ移動（親コンテナスクロールの巻き添えを完全遮断）
+  if (floatUi.parentElement !== document.body) {
+    document.body.appendChild(floatUi);
+  }
+
+  // スタイルを fixed かつ高 z-index に強制
+  floatUi.style.position = 'fixed';
+  floatUi.style.zIndex = '999999';
+
+  // 2. パレット内部のクリックやホイールが背面のキャンバスへ抜けるのをブロック
+  const stopEvts = ['mousedown', 'click', 'dblclick', 'wheel'];
+  stopEvts.forEach(evt => {
     floatUi.addEventListener(evt, e => e.stopPropagation(), { passive: evt === 'wheel' ? false : true });
   });
 
-  let isDraggingUi = false;
-  let offsetX = 0; let offsetY = 0;
+  // 3. Pointer Events による安定したドラッグ処理
+  let isDragging = false;
+  let hasMoved = false;
+  let offsetX = 0;
+  let offsetY = 0;
 
-  floatHeader.addEventListener('mousedown', e => {
+  floatHeader.addEventListener('pointerdown', e => {
+    // 最小化ボタンや入力欄をクリックした時はドラッグを開始しない
     if (['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
     if (e.target.closest('button') || e.target.id === 'palette-arrow') return;
-    isDraggingUi = true;
+
+    isDragging = true;
+    hasMoved = false;
+
+    // ポインタのキャプチャ（マウスが高速でヘッダー外に出ても追跡を失わない）
+    try { floatHeader.setPointerCapture(e.pointerId); } catch (_) {}
+
     const rect = floatUi.getBoundingClientRect();
     offsetX = e.clientX - rect.left;
     offsetY = e.clientY - rect.top;
-    floatUi.style.right = 'auto'; floatUi.style.bottom = 'auto';
-    floatUi.style.left = rect.left + 'px'; floatUi.style.top = rect.top + 'px';
-    floatUi.style.margin = '0'; floatUi.style.transition = 'none';
+
+    floatUi.style.right = 'auto';
+    floatUi.style.bottom = 'auto';
+    floatUi.style.left = rect.left + 'px';
+    floatUi.style.top = rect.top + 'px';
+    floatUi.style.margin = '0';
+    floatUi.style.transition = 'none';
+
     document.body.style.userSelect = 'none';
   });
 
-  document.addEventListener('mousemove', e => {
-    if (!isDraggingUi) return;
+  floatHeader.addEventListener('pointermove', e => {
+    if (!isDragging) return;
+
+    const dx = Math.abs(e.clientX - (parseFloat(floatUi.style.left) + offsetX));
+    const dy = Math.abs(e.clientY - (parseFloat(floatUi.style.top) + offsetY));
+    if (dx > 3 || dy > 3) hasMoved = true;
+
     let newLeft = e.clientX - offsetX;
     let newTop = e.clientY - offsetY;
-    const maxLeft = window.innerWidth - floatUi.offsetWidth;
-    const maxTop = window.innerHeight - 40;
+
+    const maxLeft = Math.max(0, window.innerWidth - floatUi.offsetWidth);
+    const maxTop = Math.max(0, window.innerHeight - 40);
     newLeft = Math.max(0, Math.min(newLeft, maxLeft));
     newTop = Math.max(0, Math.min(newTop, maxTop));
-    floatUi.style.left = newLeft + 'px'; floatUi.style.top = newTop + 'px';
+
+    floatUi.style.left = newLeft + 'px';
+    floatUi.style.top = newTop + 'px';
   });
 
-  document.addEventListener('mouseup', () => {
-    if (isDraggingUi) {
-      isDraggingUi = false;
-      document.body.style.userSelect = 'auto';
-      floatUi.style.transition = 'opacity 0.2s ease';
+  const endDrag = (e) => {
+    if (!isDragging) return;
+    isDragging = false;
+    try { floatHeader.releasePointerCapture(e.pointerId); } catch (_) {}
+    document.body.style.userSelect = 'auto';
+    floatUi.style.transition = 'opacity 0.2s ease';
+
+    // ドラッグ移動が発生していた場合は、直後の click による最小化・トグルの誤爆を握り潰す
+    if (hasMoved) {
+      const suppressClick = (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        window.removeEventListener('click', suppressClick, true);
+      };
+      window.addEventListener('click', suppressClick, true);
     }
-  });
+  };
+
+  floatHeader.addEventListener('pointerup', endDrag);
+  floatHeader.addEventListener('pointercancel', endDrag);
 }
 
 function togglePalette() {
@@ -715,12 +753,15 @@ function togglePalette() {
   if (!el) return;
   const isHidden = (el.style.display === 'none' || getComputedStyle(el).display === 'none');
   if (isHidden) {
-    el.style.display = 'flex'; el.style.position = 'fixed';
+    el.style.display = 'flex';
+    el.style.position = 'fixed';
     const rect = el.getBoundingClientRect();
     if (rect.left < 0 || rect.left > window.innerWidth - 80 || rect.top < 0 || rect.top > window.innerHeight - 80) {
       el.style.top = '110px'; el.style.left = 'auto'; el.style.right = '14px';
     }
-  } else { el.style.display = 'none'; }
+  } else {
+    el.style.display = 'none';
+  }
 }
 
 let isUiCollapsed = false;
@@ -788,7 +829,7 @@ function exportCanvasImage() {
     expCtx.translate((expW - window.room.w * expScale) / 2, 130);
     expCtx.scale(expScale, expScale);
     renderTopPlanTo(expCtx);
-    if(window.tabSeatsModule && window.tabSeatsModule.renderSeats) window.tabSeatsModule.renderSeats(expCtx);
+    if (window.tabSeatsModule && window.tabSeatsModule.renderSeats) window.tabSeatsModule.renderSeats(expCtx);
   } else {
     const expScale = (expW - 240) / window.room.d;
     expCtx.translate(120, expH * 0.62);
@@ -849,7 +890,7 @@ function initCoreEngine() {
   window.render();
   setZoom100();
   window.saveHistory();
-  window.coreLog('コアエンジン（全12ノート完全対応版）が正常にロードされました', 'info');
+  window.coreLog('コアエンジンが正常にロードされました', 'info');
 }
 
 if (document.readyState === 'loading') {
