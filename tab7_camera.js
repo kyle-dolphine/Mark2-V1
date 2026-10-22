@@ -1,9 +1,165 @@
 /**
- * tab7_camera.js - カメラ親モジュール (統括オーケストレーター)
- * 依存: camera_angle.js, camera_base.js
+ * tab7_camera.js - カメラ親モジュール (自律フォールバック内蔵・完全版)
  */
 window.tabCameraModule = (function () {
   'use strict';
+
+  // --- 再描画 & 履歴保存の安全呼び出し ---
+  function triggerRender() {
+    if (typeof window.requestRender === 'function') {
+      window.requestRender();
+    } else if (typeof window.render === 'function') {
+      window.render();
+    } else if (typeof render === 'function') {
+      render();
+    }
+  }
+
+  function triggerHistory() {
+    if (typeof window.saveHistory === 'function') {
+      window.saveHistory();
+    } else if (typeof saveHistory === 'function') {
+      saveHistory();
+    }
+  }
+
+  // --- 内蔵フォールバック用スペック定義 ---
+  const DEFAULT_CAMERA_MODELS = {
+    nx5r: { name: 'Sony HXR-NX5R (光学20倍)', minFov: 3.6, maxFov: 64.5 },
+    eng_std: { name: 'ENG 2/3型 標準22倍', minFov: 2.8, maxFov: 58.0 },
+    eng_ext: { name: 'ENG 2/3型 (2x Ext)', minFov: 1.4, maxFov: 30.0 },
+    box_tele: { name: '大型ボックス40倍', minFov: 0.8, maxFov: 40.0 },
+    manual: { name: 'マニュアル', minFov: 0.5, maxFov: 120.0 }
+  };
+
+  // --- 内部データ管理（外部 CameraBase が無い場合の自律ストレージ） ---
+  let internalCameras = [
+    {
+      id: 'CAM1',
+      name: 'CAM 1',
+      model: 'nx5r',
+      x: 7000,
+      y: 19000,
+      lensH: 1700,
+      fov: 40,
+      shotType: 'stage_ff',
+      targetGuestId: '',
+      platW: 1000,
+      platD: 1000,
+      platH: 400,
+      pan: 0,
+      tilt: 0
+    }
+  ];
+  let internalSelectedId = 'CAM1';
+
+  // --- CameraBase アダプター ---
+  const CB = {
+    getModels: () => (window.CameraBase && window.CameraBase.CAMERA_MODELS) || DEFAULT_CAMERA_MODELS,
+    getAll: () => (window.CameraBase && typeof window.CameraBase.getAll === 'function') ? window.CameraBase.getAll() : internalCameras,
+    getSelected: () => {
+      if (window.CameraBase && typeof window.CameraBase.getSelected === 'function') {
+        return window.CameraBase.getSelected();
+      }
+      return internalCameras.find(c => c.id === internalSelectedId) || internalCameras[0] || null;
+    },
+    setSelectedId: (id) => {
+      if (window.CameraBase && typeof window.CameraBase.setSelectedId === 'function') {
+        window.CameraBase.setSelectedId(id);
+      } else {
+        internalSelectedId = id;
+      }
+    },
+    addCamera: (roomW = 14000, stageY = 1200, stageD = 3000) => {
+      if (window.CameraBase && typeof window.CameraBase.addCamera === 'function') {
+        return window.CameraBase.addCamera(roomW, stageY, stageD);
+      }
+      const num = internalCameras.length + 1;
+      const newCam = {
+        id: 'CAM' + Date.now(),
+        name: `CAM ${num}`,
+        model: 'nx5r',
+        x: Math.round(roomW / 2),
+        y: Math.round(stageY + stageD + 10000),
+        lensH: 1650,
+        fov: 40,
+        shotType: 'stage_ff',
+        targetGuestId: '',
+        platW: 1000,
+        platD: 1000,
+        platH: 400,
+        pan: 0,
+        tilt: 0
+      };
+      internalCameras.push(newCam);
+      internalSelectedId = newCam.id;
+      return newCam;
+    },
+    deleteSelected: () => {
+      if (window.CameraBase && typeof window.CameraBase.deleteSelected === 'function') {
+        window.CameraBase.deleteSelected();
+      } else {
+        internalCameras = internalCameras.filter(c => c.id !== internalSelectedId);
+        internalSelectedId = internalCameras.length > 0 ? internalCameras[0].id : null;
+      }
+    },
+    alignFromLastRow: (cam, distFromLastRow, seats) => {
+      if (window.CameraBase && typeof window.CameraBase.alignFromLastRow === 'function') {
+        window.CameraBase.alignFromLastRow(cam, distFromLastRow, seats);
+        return;
+      }
+      if (!cam) return;
+      let lastRowY = 15000;
+      if (Array.isArray(seats) && seats.length > 0) {
+        lastRowY = Math.max(...seats.map(s => s.y)) + 240;
+      }
+      cam.y = Math.round(lastRowY + (parseFloat(distFromLastRow) || 2000) + (cam.platD || 1000) / 2);
+    }
+  };
+
+  // --- 内蔵アングル計算エンジン（外部 CameraAngle が無い場合の自動補完） ---
+  function computeAim(cam, stage, guests) {
+    if (window.CameraAngle && typeof window.CameraAngle.calculateAimAndFov === 'function') {
+      return window.CameraAngle.calculateAimAndFov(cam, stage, guests, CB.getModels());
+    }
+
+    const st = stage || { x: 2000, y: 1200, w: 10000, d: 3000, h: 800 };
+    let targetX = st.x + st.w / 2;
+    let targetY = st.y + st.d;
+    let targetZ = st.h + 1200;
+    let calcFov = cam.fov || 40;
+
+    const gList = Array.isArray(guests) ? guests : (guests.list || []);
+    if (cam.shotType === 'guest_single' && cam.targetGuestId) {
+      const g = gList.find(item => item.id === cam.targetGuestId);
+      if (g) {
+        targetX = g.x;
+        targetY = g.y;
+        targetZ = st.h + (g.h || 1200);
+        const dist = Math.hypot(targetX - cam.x, targetY - cam.y);
+        calcFov = Math.max(0.5, (2 * Math.atan(700 / dist)) * (180 / Math.PI));
+      }
+    } else if (cam.shotType === 'stage_ff') {
+      const dist = Math.hypot(targetX - cam.x, targetY - cam.y);
+      calcFov = Math.max(0.5, (2 * Math.atan((st.w / 2) / dist)) * (180 / Math.PI));
+    }
+
+    let hAngle = Math.atan2(targetY - cam.y, targetX - cam.x);
+    if (cam.shotType === 'manual_angle') {
+      hAngle = ((cam.pan || 0) - 90) * (Math.PI / 180);
+      calcFov = cam.fov;
+    }
+
+    const vFov = 2 * Math.atan(Math.tan((calcFov * Math.PI) / 360) * (9 / 16)) * (180 / Math.PI);
+    return { targetX, targetY, targetZ, fov: calcFov, vFov, hAngle };
+  }
+
+  function checkHeadBlock(cam, aim, seats) {
+    if (window.CameraAngle && typeof window.CameraAngle.checkHeadBlock === 'function') {
+      return window.CameraAngle.checkHeadBlock(cam, aim, seats);
+    }
+    return [];
+  }
 
   // --- 操作パネルUIのHTML動的構築 ---
   function initUI() {
@@ -111,51 +267,61 @@ window.tabCameraModule = (function () {
     updateUI();
   }
 
-  // --- イベントバインド ---
+  // --- イベントリスナー接続 ---
   function bindEvents() {
     const bind = (id, event, handler) => {
       const el = document.getElementById(id);
       if (el) el.addEventListener(event, handler);
     };
 
-    bind('camSelect', 'change', e => {
-      if (window.CameraBase) window.CameraBase.setSelectedId(e.target.value);
+    bind('btnAddCam', 'click', () => {
+      const roomW = window.room ? window.room.w : 14000;
+      const stageY = window.stage ? window.stage.y : 1200;
+      const stageD = window.stage ? window.stage.d : 3000;
+      CB.addCamera(roomW, stageY, stageD);
+      triggerHistory();
       updateUI();
-      if (window.requestRender) window.requestRender();
+      triggerRender();
+    });
+
+    bind('camSelect', 'change', e => {
+      CB.setSelectedId(e.target.value);
+      updateUI();
+      triggerRender();
     });
 
     bind('camModel', 'change', e => {
-      const sel = window.CameraBase ? window.CameraBase.getSelected() : null;
+      const sel = CB.getSelected();
       if (!sel) return;
       sel.model = e.target.value;
-      const modelDef = window.CameraBase.CAMERA_MODELS[sel.model];
+      const modelDef = CB.getModels()[sel.model];
       if (modelDef) {
         sel.fov = Math.max(modelDef.minFov, Math.min(modelDef.maxFov, sel.fov));
       }
       updateUI();
-      if (window.saveHistory) window.saveHistory();
-      if (window.requestRender) window.requestRender();
+      triggerHistory();
+      triggerRender();
     });
 
     bind('camShotType', 'change', e => {
-      const sel = window.CameraBase ? window.CameraBase.getSelected() : null;
+      const sel = CB.getSelected();
       if (!sel) return;
       sel.shotType = e.target.value;
       updateUI();
-      if (window.saveHistory) window.saveHistory();
-      if (window.requestRender) window.requestRender();
+      triggerHistory();
+      triggerRender();
     });
 
     bind('camTargetGuest', 'change', e => {
-      const sel = window.CameraBase ? window.CameraBase.getSelected() : null;
+      const sel = CB.getSelected();
       if (!sel) return;
       sel.targetGuestId = e.target.value;
-      if (window.saveHistory) window.saveHistory();
-      if (window.requestRender) window.requestRender();
+      triggerHistory();
+      triggerRender();
     });
 
     bind('camFovSlider', 'input', e => {
-      const sel = window.CameraBase ? window.CameraBase.getSelected() : null;
+      const sel = CB.getSelected();
       if (!sel) return;
       sel.fov = parseFloat(e.target.value) || 40;
       sel.shotType = 'manual_angle';
@@ -164,34 +330,34 @@ window.tabCameraModule = (function () {
       const fovDisplay = document.getElementById('fovValDisplay');
       if (fovDisplay) fovDisplay.innerText = sel.fov.toFixed(1);
       updateUI();
-      if (window.requestRender) window.requestRender();
+      triggerRender();
     });
 
     bind('camPanSlider', 'input', e => {
-      const sel = window.CameraBase ? window.CameraBase.getSelected() : null;
+      const sel = CB.getSelected();
       if (!sel) return;
       sel.pan = parseFloat(e.target.value) || 0;
       const panDisp = document.getElementById('camPanDisplay');
       if (panDisp) panDisp.innerText = (sel.pan > 0 ? '+' : '') + sel.pan;
-      if (window.requestRender) window.requestRender();
+      triggerRender();
     });
 
     bind('camTiltSlider', 'input', e => {
-      const sel = window.CameraBase ? window.CameraBase.getSelected() : null;
+      const sel = CB.getSelected();
       if (!sel) return;
       sel.tilt = parseFloat(e.target.value) || 0;
       const tiltDisp = document.getElementById('camTiltDisplay');
       if (tiltDisp) tiltDisp.innerText = (sel.tilt > 0 ? '+' : '') + sel.tilt;
-      if (window.requestRender) window.requestRender();
+      triggerRender();
     });
 
     const numSync = (id, prop) => {
       bind(id, 'change', e => {
-        const sel = window.CameraBase ? window.CameraBase.getSelected() : null;
+        const sel = CB.getSelected();
         if (!sel) return;
         sel[prop] = parseFloat(e.target.value) || 0;
-        if (window.saveHistory) window.saveHistory();
-        if (window.requestRender) window.requestRender();
+        triggerHistory();
+        triggerRender();
       });
     };
 
@@ -202,51 +368,37 @@ window.tabCameraModule = (function () {
     numSync('platD', 'platD');
     numSync('platH', 'platH');
 
-    bind('btnAddCam', 'click', () => {
-      if (!window.CameraBase) return;
-      const roomW = window.room ? window.room.w : 14000;
-      const stageY = window.stage ? window.stage.y : 1200;
-      const stageD = window.stage ? window.stage.d : 3000;
-      window.CameraBase.addCamera(roomW, stageY, stageD);
-      if (window.saveHistory) window.saveHistory();
-      updateUI();
-      if (window.requestRender) window.requestRender();
-    });
-
     bind('btnDeleteCam', 'click', () => {
-      if (!window.CameraBase) return;
-      if (window.CameraBase.getAll().length <= 1) {
+      if (CB.getAll().length <= 1) {
         alert('これ以上削除できません。');
         return;
       }
-      window.CameraBase.deleteSelected();
-      if (window.saveHistory) window.saveHistory();
+      CB.deleteSelected();
+      triggerHistory();
       updateUI();
-      if (window.requestRender) window.requestRender();
+      triggerRender();
     });
 
     bind('btnAlignLastRow', 'click', () => {
-      if (!window.CameraBase) return;
-      const sel = window.CameraBase.getSelected();
+      const sel = CB.getSelected();
       if (!sel) return;
       const dist = parseFloat(document.getElementById('camDistFromLastRow')?.value) || 2000;
       const seats = window.tabSeatsModule ? window.tabSeatsModule.exportData() : (window.seats || []);
-      window.CameraBase.alignFromLastRow(sel, dist, seats);
-      if (window.saveHistory) window.saveHistory();
+      CB.alignFromLastRow(sel, dist, seats);
+      triggerHistory();
       updateUI();
-      if (window.requestRender) window.requestRender();
+      triggerRender();
     });
   }
 
   // --- UI 入力値・選択肢の更新 ---
   function updateUI() {
-    if (!window.CameraBase) return;
-    const sel = window.CameraBase.getSelected();
+    const sel = CB.getSelected();
     const select = document.getElementById('camSelect');
     if (!select) return;
 
     select.innerHTML = '';
-    window.CameraBase.getAll().forEach(c => {
+    CB.getAll().forEach(c => {
       const opt = document.createElement('option');
       opt.value = c.id;
       opt.innerText = c.name;
@@ -256,7 +408,7 @@ window.tabCameraModule = (function () {
     const gSelect = document.getElementById('camTargetGuest');
     if (gSelect) {
       gSelect.innerHTML = '';
-      const guests = window.tabGuestsModule ? window.tabGuestsModule.exportData() : [];
+      const guests = window.tabGuestsModule ? window.tabGuestsModule.exportData() : (window.guests || []);
       const gList = Array.isArray(guests) ? guests : (guests.list || []);
       gList.forEach(g => {
         const opt = document.createElement('option');
@@ -276,7 +428,7 @@ window.tabCameraModule = (function () {
     if (el('camY')) el('camY').value = Math.round(sel.y);
     if (el('camH')) el('camH').value = Math.round(sel.lensH);
 
-    const modelDef = window.CameraBase.CAMERA_MODELS[sel.model || 'nx5r'];
+    const modelDef = CB.getModels()[sel.model || 'nx5r'];
     const slider = el('camFovSlider');
     if (slider && modelDef) {
       slider.min = modelDef.minFov;
@@ -309,24 +461,28 @@ window.tabCameraModule = (function () {
 
   // --- 平面図描画 (Top View) ---
   function drawTop(ctx) {
-    if (!window.CameraBase || !window.CameraAngle) return;
-    const cams = window.CameraBase.getAll();
+    const cams = CB.getAll();
+    if (!cams || cams.length === 0) return;
+
     const stage = window.stage || { x: 2000, y: 1200, w: 10000, d: 3000, h: 800 };
-    const guests = window.tabGuestsModule ? window.tabGuestsModule.exportData() : [];
+    const guests = window.tabGuestsModule ? window.tabGuestsModule.exportData() : (window.guests || []);
     const seats = window.tabSeatsModule ? window.tabSeatsModule.exportData() : (window.seats || []);
 
     cams.forEach(cam => {
-      const aim = window.CameraAngle.calculateAimAndFov(cam, stage, guests, window.CameraBase.CAMERA_MODELS);
-      const isSelected = (cam.id === window.CameraBase.getSelected()?.id);
+      const aim = computeAim(cam, stage, guests);
+      const isSelected = (cam.id === CB.getSelected()?.id);
 
       ctx.save();
+      // 1. イントレ台座
       ctx.fillStyle = isSelected ? 'rgba(236, 72, 153, 0.25)' : 'rgba(203, 213, 225, 0.4)';
       ctx.strokeStyle = isSelected ? '#ec4899' : '#64748b';
       ctx.lineWidth = isSelected ? 30 : 20;
       ctx.fillRect(cam.x - cam.platW / 2, cam.y - cam.platD / 2, cam.platW, cam.platD);
       ctx.strokeRect(cam.x - cam.platW / 2, cam.y - cam.platD / 2, cam.platW, cam.platD);
 
-      if (window.displaySettings && window.displaySettings.showFov) {
+      // 2. 画角コーン (FOV)
+      const showFov = window.displaySettings ? (window.displaySettings.showCamFov ?? window.displaySettings.showFov ?? true) : true;
+      if (showFov) {
         const radLeft = aim.hAngle - (aim.fov / 2) * (Math.PI / 180);
         const radRight = aim.hAngle + (aim.fov / 2) * (Math.PI / 180);
         const dist = Math.hypot(aim.targetX - cam.x, aim.targetY - cam.y) + 3000;
@@ -342,7 +498,7 @@ window.tabCameraModule = (function () {
         ctx.lineWidth = 15;
         ctx.stroke();
 
-        const blocked = window.CameraAngle.checkHeadBlock(cam, aim, seats);
+        const blocked = checkHeadBlock(cam, aim, seats);
         ctx.beginPath();
         ctx.moveTo(cam.x, cam.y);
         ctx.lineTo(aim.targetX, aim.targetY);
@@ -351,6 +507,7 @@ window.tabCameraModule = (function () {
         ctx.stroke();
       }
 
+      // 3. カメラヘッド
       ctx.beginPath();
       ctx.arc(cam.x, cam.y, 250, 0, Math.PI * 2);
       ctx.fillStyle = '#a855f7';
@@ -359,6 +516,7 @@ window.tabCameraModule = (function () {
       ctx.lineWidth = 40;
       ctx.stroke();
 
+      // カメラ名ラベル
       ctx.fillStyle = '#0f172a';
       ctx.font = 'bold 240px sans-serif';
       ctx.textAlign = 'center';
@@ -367,16 +525,15 @@ window.tabCameraModule = (function () {
     });
   }
 
-  // --- 立面図描画 (Side View: コアエンジンの床面 Z=0 基準) ---
+  // --- 立面図描画 (Side View: 床面 Z=0 基準) ---
   function drawCameraSide(ctx) {
-    if (!window.CameraBase || !window.CameraAngle) return;
-    const sel = window.CameraBase.getSelected();
+    const sel = CB.getSelected();
     if (!sel) return;
 
     const stage = window.stage || { h: 800 };
-    const guests = window.tabGuestsModule ? window.tabGuestsModule.exportData() : [];
+    const guests = window.tabGuestsModule ? window.tabGuestsModule.exportData() : (window.guests || []);
     const seats = window.tabSeatsModule ? window.tabSeatsModule.exportData() : (window.seats || []);
-    const aim = window.CameraAngle.calculateAimAndFov(sel, stage, guests, window.CameraBase.CAMERA_MODELS);
+    const aim = computeAim(sel, stage, guests);
 
     const camPosY = sel.y;
     const camPosZ = -sel.lensH;
@@ -385,9 +542,11 @@ window.tabCameraModule = (function () {
 
     ctx.save();
 
+    // イントレ台座
     ctx.fillStyle = '#ec4899';
     ctx.fillRect(camPosY - sel.platD / 2, -sel.platH, sel.platD, sel.platH);
 
+    // 三脚
     ctx.strokeStyle = '#64748b';
     ctx.lineWidth = 30;
     ctx.beginPath();
@@ -395,11 +554,13 @@ window.tabCameraModule = (function () {
     ctx.lineTo(camPosY, camPosZ);
     ctx.stroke();
 
+    // ヘッド
     ctx.beginPath();
     ctx.arc(camPosY, camPosZ, 180, 0, Math.PI * 2);
     ctx.fillStyle = '#a855f7';
     ctx.fill();
 
+    // 上下レイ
     const centerAngle = Math.atan2(tgtPosZ - camPosZ, tgtPosY - camPosY);
     const halfVFovRad = ((aim.vFov / 2) * Math.PI) / 180;
     const topRayAngle = centerAngle - halfVFovRad;
@@ -414,7 +575,7 @@ window.tabCameraModule = (function () {
     ctx.setLineDash([80, 40]);
     ctx.stroke();
 
-    const blocked = window.CameraAngle.checkHeadBlock(sel, aim, seats);
+    const blocked = checkHeadBlock(sel, aim, seats);
     ctx.beginPath();
     ctx.moveTo(camPosY, camPosZ);
     ctx.lineTo(camPosY + rayLength * Math.cos(bottomRayAngle), camPosZ + rayLength * Math.sin(bottomRayAngle));
@@ -428,12 +589,11 @@ window.tabCameraModule = (function () {
 
   // --- ドラッグ判定 ---
   function hitTest(wx, wy) {
-    if (!window.CameraBase) return null;
-    const cams = window.CameraBase.getAll();
+    const cams = CB.getAll();
     for (let i = cams.length - 1; i >= 0; i--) {
       const c = cams[i];
       if (Math.hypot(wx - c.x, wy - c.y) < 350) {
-        window.CameraBase.setSelectedId(c.id);
+        CB.setSelectedId(c.id);
         updateUI();
         if (window.switchTab) window.switchTab('camera');
         return { type: 'camera_head', cam: c, offsetX: wx - c.x, offsetY: wy - c.y };
@@ -442,7 +602,7 @@ window.tabCameraModule = (function () {
         wx >= c.x - c.platW / 2 && wx <= c.x + c.platW / 2 &&
         wy >= c.y - c.platD / 2 && wy <= c.y + c.platD / 2
       ) {
-        window.CameraBase.setSelectedId(c.id);
+        CB.setSelectedId(c.id);
         updateUI();
         if (window.switchTab) window.switchTab('camera');
         return { type: 'camera_platform', cam: c, offsetX: wx - c.x, offsetY: wy - c.y };
@@ -459,7 +619,7 @@ window.tabCameraModule = (function () {
     }
   }
 
-  // --- スクリプト読み込み時の自動初期化トリガー ---
+  // --- 初期化実行 ---
   if (document.readyState === 'loading') {
     window.addEventListener('DOMContentLoaded', initUI);
   } else {
@@ -474,10 +634,15 @@ window.tabCameraModule = (function () {
     drawSide: drawCameraSide,
     hitTest,
     handleDrag,
-    exportData: () => (window.CameraBase ? window.CameraBase.exportData() : []),
+    exportData: () => CB.getAll(),
     importData: (d) => {
-      if (window.CameraBase) window.CameraBase.importData(d);
+      if (window.CameraBase && typeof window.CameraBase.importData === 'function') {
+        window.CameraBase.importData(d);
+      } else if (Array.isArray(d)) {
+        internalCameras = JSON.parse(JSON.stringify(d));
+      }
       updateUI();
+      triggerRender();
     }
   };
 })();
