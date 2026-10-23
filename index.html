@@ -127,7 +127,6 @@
           <div id="panel-dbg-mail" class="debug-panel">
             <div class="debug-mail-form">
               <div class="dbg-form-row">
-                <!-- プレースホルダーを「例: クラフト」に変更 -->
                 <input type="text" id="feedback-sender" placeholder="お名前・担当 (例: クラフト)" />
               </div>
               <div class="dbg-form-row">
@@ -137,7 +136,6 @@
                 <label class="dbg-checkbox-label">
                   <input type="checkbox" id="feedback-attach-state" checked /> 図面状態を添付
                 </label>
-                <!-- 送信先を noguchi.kairu@aur.co.jp に設定（引数およびdata属性で渡す） -->
                 <button type="button" class="btn-dbg-send" id="btn-dbg-send" data-mailto="noguchi.kairu@aur.co.jp" onclick="if(window.debugBox)window.debugBox.sendFeedback('noguchi.kairu@aur.co.jp')">メール送信</button>
               </div>
               <div id="feedback-status" class="feedback-status-msg"></div>
@@ -220,17 +218,17 @@
   <script src="tab5_stage_items.js"></script>
   <script src="tab6_seats.js"></script>
 
-  <!-- 4. カメラセクション (必ず base → angle → tab7_camera の順で読み込む) -->
+  <!-- 4. カメラセクション (必ず base → angle → tab7_camera の順) -->
   <script src="camera_angle.js"></script>
   <script src="camera_base.js"></script>
   <script src="tab7_camera.js"></script>
 
-  <!-- 5. 今後追加するタブモジュール (実装完了後に順次コメントアウトを解除) -->
-  <!-- <script src="tab8_display.js"></script> -->
-  <!-- <script src="tab9_equipment.js"></script> -->
-  <!-- <script src="tab10_monitor.js"></script> -->
-  <!-- <script src="tab11_bgimage.js"></script> -->
-  <!-- <script src="tab12_ai_gen.js"></script> -->
+  <!-- 5. その他のタブモジュール (すべて常時読み込み) -->
+  <script src="tab8_display.js"></script>
+  <script src="tab9_equipment.js"></script>
+  <script src="tab10_monitor.js"></script>
+  <script src="tab11_bgimage.js"></script>
+  <script src="tab12_ai_gen.js"></script>
 
 </body>
-</html
+</html>
